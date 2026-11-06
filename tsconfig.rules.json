@@ -1,0 +1,14 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "CommonJS",
+    "moduleResolution": "node",
+    "strict": true,
+    "noEmitOnError": true,
+    "skipLibCheck": true,
+    "rootDir": "game/assets/scripts",
+    "outDir": ".test-build",
+    "lib": ["ES2020"]
+  },
+  "include": ["game/assets/scripts/core/**/*.ts", "game/assets/scripts/session/**/*.ts", "game/assets/scripts/InputBridge.ts", "game/assets/scripts/Feedback.ts"]
+}

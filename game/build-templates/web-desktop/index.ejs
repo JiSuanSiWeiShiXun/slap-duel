@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>掌上对决</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="theme-color" content="#16232C">
+  <link rel="stylesheet" type="text/css" href="<%= cssUrl %>">
+</head>
+<body>
+  <div id="GameDiv">
+    <div id="Cocos3dGameContainer">
+      <canvas id="GameCanvas" tabindex="0" aria-label="掌上对决游戏" oncontextmenu="event.preventDefault()"></canvas>
+    </div>
+  </div>
+  <%- include(cocosTemplate, {}) %>
+</body>
+</html>

@@ -1,0 +1,33 @@
+{
+  "name": "seasun-slap-duel",
+  "platform": "web-desktop",
+  "buildPath": "project://build",
+  "outputName": "web-desktop",
+  "debug": true,
+  "sourceMaps": true,
+  "includeModules": [
+    "base",
+    "gfx-webgl",
+    "gfx-webgl2",
+    "3d",
+    "2d",
+    "ui",
+    "graphics",
+    "primitive",
+    "profiler"
+  ],
+  "md5Cache": false,
+  "startScene": "ab1175a8-174a-4c23-9e97-75d8825befc3",
+  "scenes": [
+    {
+      "url": "db://assets/scenes/main.scene",
+      "uuid": "ab1175a8-174a-4c23-9e97-75d8825befc3"
+    }
+  ],
+  "designResolution": {
+    "width": 720,
+    "height": 1280,
+    "fitWidth": true,
+    "fitHeight": false
+  }
+}

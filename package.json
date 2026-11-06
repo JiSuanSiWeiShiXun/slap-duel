@@ -1,0 +1,10 @@
+{
+  "name": "seasun-slap-duel-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "test": "node tools/check.mjs test",
+    "test:rules": "node tools/check.mjs rules",
+    "typecheck": "node tools/check.mjs typecheck"
+  }
+}

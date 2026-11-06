@@ -1,0 +1,29 @@
+# Generated dependencies, Cocos caches and build artifacts.
+node_modules/
+game/library/
+game/temp/
+game/local/
+game/profiles/
+game/build/
+game/.test-build/
+/.test-build/
+
+# Machine/account configuration and credentials.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+**/project.private.config.json
+.DS_Store
+
+# Private planning, project management, recordings, QR previews and evidence.
+/.planning/
+/.notion-pm-private/
+/AGENTS.md
+/docs/**
+!/docs/public/
+!/docs/public/**
+/tools/verify-evidence.mjs

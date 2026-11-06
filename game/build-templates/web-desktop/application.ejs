@@ -1,0 +1,43 @@
+<%- include(versionCheckTemplate, { version: '1.0.0'}) %>
+// Based on the installed Cocos Creator 3.8.8 launcher/application.ejs.
+let cc;
+export class Application {
+    constructor () {
+        this.settingsPath = '<%= settingsJsonPath %>';
+        this.showFPS = <%= showFPS %>;
+    }
+
+    init (engine) {
+        cc = engine;
+        cc.game.onPostBaseInitDelegate.add(this.onPostInitBase.bind(this));
+        cc.game.onPostSubsystemInitDelegate.add(this.onPostSystemInit.bind(this));
+    }
+
+    onPostInitBase () {}
+
+    onPostSystemInit () {}
+
+    start () {
+        // Explicit, bounded Web diagnostics only; absent/invalid values preserve
+        // the project's configured frame rate. This uses the real engine pacer.
+        const diagnosticFps = new URLSearchParams(window.location.search).get('diagnosticFps');
+        const frameRateOverride = ['15', '30', '60'].includes(diagnosticFps)
+            ? { frameRate: Number(diagnosticFps) } : {};
+        return cc.game.init({
+            debugMode: <%= debugMode %> ? cc.DebugMode.INFO : cc.DebugMode.ERROR,
+            settingsPath: this.settingsPath,
+            overrideSettings: {
+                // The page fills the browser. Let Cocos resize its render target
+                // and input coordinates with the viewport, rather than treating
+                // the CSS-sized container as a fixed desktop sub-frame.
+                screen: {
+                    exactFitScreen: true,
+                    ...frameRateOverride,
+                },
+                profiling: {
+                    showFPS: this.showFPS,
+                },
+            },
+        }).then(() => cc.game.run());
+    }
+}
