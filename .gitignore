@@ -17,6 +17,7 @@ game/.test-build/
 *.p12
 *.pfx
 **/project.private.config.json
+/game/settings/v2/packages/information.json
 .DS_Store
 
 # Private planning, project management, recordings, QR previews and evidence.
