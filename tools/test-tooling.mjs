@@ -5,7 +5,37 @@ import path from 'node:path';
 import http from 'node:http';
 import { projectPath, compressUuid, checkConfig } from './bootstrap-game.mjs';
 import { createStaticServer, resolveRequest } from './serve.mjs';
-import { assertPreparedBuild, artifactContainsBuildId } from './check-game.mjs';
+import { assertPreparedBuild, artifactContainsBuildId, sourceDigest } from './check-game.mjs';
+
+test('regenerated editor account metadata is excluded while real build inputs remain covered', () => {
+  const root = projectPath(`game/local/tooling-tests/digest-${process.pid}`);
+  const write = (relative, value) => {
+    const file = path.join(root, relative);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, value);
+  };
+  const inputs = {
+    'game/package.json': '{"creator":{"version":"3.8.8"}}',
+    'game/settings/v2/packages/engine.json': '{"feature":true}',
+    'game/build-config/web-desktop.json': '{"debug":false}',
+    'game/build-templates/web-desktop/index.ejs': '<canvas></canvas>',
+    'game/assets/scripts/Game.ts': 'export const damage = 1;',
+    'game/assets/scripts/Game.ts.meta': '{"uuid":"fixture-resource-reference"}',
+  };
+  for (const [relative, content] of Object.entries(inputs)) write(relative, content);
+  const beforeEditorStartup = sourceDigest(root);
+  const editorMetadata = 'game/settings/v2/packages/information.json';
+  write(editorMetadata, '{"information":{"accountForm":"local-editor-only"}}');
+  assert.equal(sourceDigest(root), beforeEditorStartup);
+  write(editorMetadata, '{"information":{"accountForm":"changed-local-editor-only"}}');
+  assert.equal(sourceDigest(root), beforeEditorStartup);
+  for (const [relative, content] of Object.entries(inputs)) {
+    write(relative, content + '\nchanged-build-input');
+    assert.notEqual(sourceDigest(root), beforeEditorStartup, relative);
+    write(relative, content);
+    assert.equal(sourceDigest(root), beforeEditorStartup);
+  }
+});
 
 test('build provenance rejects changed inputs, identity, target and missing compiled ID', () => {
   const prepared = { target: 'web-desktop', nonce: 'build-one', revision: 'abc123', preparedAt: '2026-11-06T00:00:00Z',

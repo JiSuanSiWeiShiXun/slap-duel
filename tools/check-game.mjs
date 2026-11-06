@@ -13,19 +13,24 @@ function entries(directory) {
   }).sort();
 }
 
-function digestSources(excludeBuildInfo = false) {
+function digestSources(excludeBuildInfo = false, sourceRoot = ROOT) {
+  const root = projectPath(path.relative(ROOT, path.resolve(sourceRoot)));
   const hash = crypto.createHash('sha256');
-  const buildInfo = projectPath('game/assets/scripts/BuildInfo.ts');
-  for (const file of [...entries(projectPath('game/assets')), ...entries(projectPath('game/build-config')),
-    ...entries(projectPath('game/build-templates')), ...entries(projectPath('game/settings')), projectPath('game/package.json')]) {
+  const buildInfo = path.join(root, 'game/assets/scripts/BuildInfo.ts');
+  for (const file of [...entries(path.join(root, 'game/assets')), ...entries(path.join(root, 'game/build-config')),
+    ...entries(path.join(root, 'game/build-templates')), ...entries(path.join(root, 'game/settings')), path.join(root, 'game/package.json')]) {
     if (excludeBuildInfo && file === buildInfo) continue;
-    hash.update(path.relative(ROOT, file).replaceAll('\\', '/'));
+    const relative = path.relative(root, file).replaceAll('\\', '/');
+    // Creator regenerates this editor account/form metadata during startup; it
+    // is not a game build input and must remain private even when absent at prepare.
+    if (relative === 'game/settings/v2/packages/information.json') continue;
+    hash.update(relative);
     hash.update(fs.readFileSync(file));
   }
   return hash.digest('hex');
 }
 
-export function sourceDigest() { return digestSources(); }
+export function sourceDigest(sourceRoot = ROOT) { return digestSources(false, sourceRoot); }
 
 function preparedPath(target) {
   targetDirectory(target);
