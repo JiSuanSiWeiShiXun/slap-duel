@@ -1,6 +1,6 @@
 import {
     _decorator, Component, Node, Camera, Canvas, UITransform, Layers, Color, Vec3,
-    MeshRenderer, Material, Mesh, primitives, utils, Label, Graphics,
+    Label, Graphics,
     input, Input, EventTouch, game, Game, view, screen, ResolutionPolicy, sys, DirectionalLight, profiler, director, Director,
     resources, JsonAsset, Prefab, assetManager, Asset, Sprite, SpriteFrame, Texture2D,
 } from 'cc';
@@ -13,6 +13,7 @@ import { FighterPose, Point } from './ParryMotion';
 import { CharacterTimeline } from './CharacterTimeline';
 import { CharacterView, CastManifest, RoleId } from './CharacterView';
 import { CastCatalog, RoundSetup, RoundTicket, RoundGate, ROLE_IDS, createCastCatalog, makeRoundSetup, projectIntro, castResource } from './Cast';
+import { ArenaView } from './ArenaView';
 
 const { ccclass } = _decorator;
 type Page = 'menu' | 'practice' | 'loading' | 'intro' | 'battle' | 'paused' | 'confirm' | 'result' | 'error';
@@ -79,8 +80,7 @@ export class SlapGame extends Component {
     private catalogGeneration = 0;
     private pendingSkinState: BattleState | null = null;
     private pendingPoses: [FighterPose, FighterPose] | null = null;
-    private materials: Material[] = [];
-    private meshes: Mesh[] = [];
+    private arena: ArenaView | null = null;
     private seenEvents = new Set<string>();
     private motion = new CharacterTimeline();
     private feedback = '';
@@ -245,27 +245,8 @@ export class SlapGame extends Component {
         this.world.addChild(lightNode);
         lightNode.setRotationFromEuler(-45, -30, 0);
         lightNode.addComponent(DirectionalLight);
-        this.shape(this.world, 'Stage', 'box', [6, 0.2, 3], [0, -0.15, 0], '#344D5B');
-        this.shape(this.world, 'CenterStripe', 'box', [0.045, 0.012, 2.6], [0, -0.038, 0], C.gold);
+        this.arena = new ArenaView(this.world);
         // Characters are imported skinned assets. Missing resources use the error path.
-    }
-
-    private shape(parent: Node, name: string, kind: 'box' | 'sphere', scale: number[], pos: number[], color: string): Node {
-        const node = new Node(name);
-        parent.addChild(node);
-        node.layer = Layers.Enum.DEFAULT;
-        node.setPosition(pos[0], pos[1], pos[2]);
-        node.setScale(scale[0], scale[1], scale[2]);
-        const renderer = node.addComponent(MeshRenderer);
-        const mesh = utils.createMesh(kind === 'sphere' ? primitives.sphere(0.5) : primitives.box());
-        renderer.mesh = mesh;
-        this.meshes.push(mesh);
-        const material = new Material();
-        material.initialize({ effectName: 'builtin-unlit' });
-        material.setProperty('mainColor', new Color(color));
-        renderer.setMaterial(material, 0);
-        this.materials.push(material);
-        return node;
     }
 
     private loadAsset<T extends Asset>(uuid: string): Promise<T> {
@@ -837,8 +818,7 @@ export class SlapGame extends Component {
         view.off('canvas-resize', this.resize, this);
         this.bridge.cancelAll(); this.session?.pause();
         this.motion.reset();
-        for (const mesh of this.meshes) mesh.destroy();
-        for (const material of this.materials) material.destroy();
+        this.arena?.dispose(); this.arena = null;
         for (const asset of this.ownedAssets) asset.decRef();
         this.ownedAssets.clear(); this.loadingAssets.clear(); this.roleTextures.clear();
         delete (globalThis as unknown as Record<string, unknown>).__SLAP_DEBUG__;
