@@ -87,7 +87,8 @@ const rig = {
 };
 const guardShoulders = { manager:[-.2359644,1.47,-.1464372], veteran:[-.2661378,1.4689625,-.1174429], rookie:[-.2611350,1.5279314,-.1032784] };
 const capturedSourceHashes = {
-  manager: 'ff49ef76912e0a3c4f807fc96aecf2ac1fe0389344e7a46b922cf3b2f7689b5c',
+  // Revision2 changes only narration. Full converted glTF/bin and PNG are byte-identical to the FK capture.
+  manager: 'b15f0eb6c5e925308dbaf3c3e2385cb17823adaadcfae367691a55a0d1887b8e',
   veteran: 'a45a72b8037f85fd3008ef692c2acbd3dd9067354136e9ab6e1ce12bb2275359',
   rookie: 'a4eab106bfec150cc87c92666241b98467505a3de1246d72bc76ee69d32fea1b',
 };

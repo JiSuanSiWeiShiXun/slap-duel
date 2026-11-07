@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "source": {
     "roleId": "manager",
-    "assetRevision": 1,
+    "assetRevision": 2,
     "rigSpecVersion": "office-humanoid-29-v1",
     "generatorVersion": "office-cast-1",
     "blenderVersion": "4.5.14 LTS",
@@ -33,7 +33,7 @@
     "displayName": "职场中层",
     "facets": {
       "positive": "表达有条理，擅长把复杂信息组织成一场清晰的汇报。",
-      "negative": "把同事做出的成果，包装成了自己精心部署的功劳。"
+      "negative": "欺上瞒下，汇报时功劳归自己，出错让下属背锅。"
     },
     "appearance": {
       "outfit": "blazer",
@@ -62,13 +62,13 @@
   },
   "generated": {
     "generatorSha256": "abd8f3d38e0735c59e427cae2bca1c3436cb72aa1415e07f4b3a55407630711e",
-    "sourceHash": "ff49ef76912e0a3c4f807fc96aecf2ac1fe0389344e7a46b922cf3b2f7689b5c",
+    "sourceHash": "b15f0eb6c5e925308dbaf3c3e2385cb17823adaadcfae367691a55a0d1887b8e",
     "portraitReviewed": true,
     "outputs": {
       "character.fbx": {
         "path": "game/assets/resources/office-cast/manager/character.fbx",
         "bytes": 1727372,
-        "sha256": "58aecd1d90e4e4bb4293888fdc6a60f085e561736e8c8d03a9ece5c5faffcb61",
+        "sha256": "662e3ddc91548ad749081bacd84b296d4a50f9657c5a053b39a3b567452e2a85",
         "format": "FBX7400"
       },
       "portrait.png": {
@@ -117,14 +117,14 @@
       "triangles": 5802,
       "maxInfluences": 2,
       "blendedVertices": 242,
-      "maxWeightError": 0,
+      "maxWeightError": 0.0,
       "maxEvaluatedDisplacement": 0.9088592579251777,
       "fcurves": 203,
       "sourceClips": [
         {
           "name": "idle",
-          "from": 0,
-          "to": 2,
+          "from": 0.0,
+          "to": 2.0,
           "fps": 60
         },
         {
@@ -177,8 +177,8 @@
         },
         {
           "name": "counter",
-          "from": 10,
-          "to": 11,
+          "from": 10.0,
+          "to": 11.0,
           "fps": 60
         },
         {
@@ -239,14 +239,14 @@
       "inverseBindMatrices": 29,
       "exportVertices": 3231,
       "blendedVertices": 242,
-      "maxWeightError": 2.9802322387695312e-8,
+      "maxWeightError": 2.9802322387695312e-08,
       "maxInfluences": 2,
       "animationName": "Scene",
       "animationChannels": 90,
       "wrapperScale": [
-        100,
-        100,
-        100
+        100.0,
+        100.0,
+        100.0
       ]
     },
     "imports": {

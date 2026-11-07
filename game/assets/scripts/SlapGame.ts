@@ -12,9 +12,10 @@ import { BUILD_ID } from './BuildInfo';
 import { FighterPose, Point } from './ParryMotion';
 import { CharacterTimeline } from './CharacterTimeline';
 import { CharacterView, CastManifest, RoleId } from './CharacterView';
+import { CastCatalog, RoundSetup, RoundTicket, RoundGate, ROLE_IDS, createCastCatalog, makeRoundSetup, projectIntro, castResource } from './Cast';
 
 const { ccclass } = _decorator;
-type Page = 'menu' | 'practice' | 'loading' | 'battle' | 'paused' | 'confirm' | 'result' | 'error';
+type Page = 'menu' | 'practice' | 'loading' | 'intro' | 'battle' | 'paused' | 'confirm' | 'result' | 'error';
 type Practice = 'normal' | 'hit' | 'block' | 'parry';
 type Button = { transform: UITransform; label: Label; action: () => void };
 type ContactFrame = {
@@ -61,10 +62,17 @@ export class SlapGame extends Component {
     private timerLabel: Label | null = null;
     private characterView = new CharacterView();
     private cast: CastManifest[] = [];
+    private catalog: CastCatalog | null = null;
+    private roundSetup: RoundSetup | null = null;
+    private roundGate = new RoundGate();
+    private introViewer: 0 | 1 = 0;
+    private diagnosticIntro = false;
+    private startupError = '';
     private selectedRole: RoleId = 'manager';
     private opponentRole: RoleId = 'manager';
     private roleTextures = new Map<RoleId, Texture2D>();
     private loadingAssets = new Map<string, Promise<Asset>>();
+    private ownedAssets = new Set<Asset>();
     private portraitFrames: SpriteFrame[] = [];
     private loadGeneration = 0;
     private castError = '';
@@ -97,6 +105,7 @@ export class SlapGame extends Component {
     private framePublishedWallMs = -Infinity;
     private diagnosticStart: 'slow' | 'fail-once' | null = null;
     private diagnosticStartFailed = false;
+    private diagnosticRole: string | null = null;
 
     onLoad(): void {
         profiler.hideStats();
@@ -107,6 +116,12 @@ export class SlapGame extends Component {
                 this.frameDiagnosticCanvas = document.getElementById('GameCanvas');
             }
             if (query.get('diagnosticMotion') === '1') this.motionDiagnosticCanvas = document.getElementById('GameCanvas');
+            this.diagnosticIntro = query.get('diagnosticIntro') === '1';
+            if (this.diagnosticIntro) {
+                this.motionDiagnosticCanvas = document.getElementById('GameCanvas');
+                this.introViewer = query.get('viewer') === '1' ? 1 : 0;
+                this.diagnosticRole = query.get('diagnosticRole');
+            }
             const startup = query.get('diagnosticStart');
             if (startup === 'slow' || startup === 'fail-once') this.diagnosticStart = startup;
         }
@@ -126,6 +141,7 @@ export class SlapGame extends Component {
         (globalThis as unknown as Record<string, unknown>).__SLAP_DEBUG__ = {
             build: BUILD_ID,
             inspect: () => ({ page: this.page, mode: this.mode, practice: this.practice,
+                setup: this.roundSetup, viewerActorId: this.introViewer,
                 state: this.session?.snapshot() ?? null, visualElapsedMs: this.resultVisualMs, events: this.trace.map(e => ({ ...e })), cast: this.skinEvidence(),
                 frames: this.frameDiagnostics() }),
         };
@@ -200,6 +216,7 @@ export class SlapGame extends Component {
         // Never read this attribute back into gameplay; no command API is added.
         this.frameDiagnosticCanvas.setAttribute('data-slap-diagnostics', JSON.stringify({
             build: BUILD_ID, page: this.page, mode: this.mode, practice: this.practice,
+            setup: this.roundSetup, viewerActorId: this.introViewer,
             frames: this.frameDiagnostics(),
             state: state ? { sessionId: state.sessionId, nowMs: state.nowMs, result: state.result,
                 fighters: state.fighters.map(f => ({ hp: f.hp, phase: f.phase, guardCharges: f.guardCharges })) } : null,
@@ -255,7 +272,12 @@ export class SlapGame extends Component {
         if (!uuid || !/^[a-zA-Z0-9@-]+$/.test(uuid)) return Promise.reject(new Error('Missing imported character reference'));
         let promise = this.loadingAssets.get(uuid);
         if (!promise) {
-            promise = new Promise<Asset>((resolve, reject) => assetManager.loadAny<Asset>(uuid, (error, value) => error ? reject(error) : resolve(value)));
+            promise = new Promise<Asset>((resolve, reject) => assetManager.loadAny<Asset>(uuid, (error, value) => {
+                if (error) { reject(error); return; }
+                value.addRef();
+                if (!this.isValid) { value.decRef(); reject(new Error('Character owner disposed')); return; }
+                this.ownedAssets.add(value); resolve(value);
+            }));
             this.loadingAssets.set(uuid, promise);
             promise.catch(() => this.loadingAssets.delete(uuid));
         }
@@ -264,13 +286,18 @@ export class SlapGame extends Component {
 
     private loadCast(): void {
         const token = ++this.catalogGeneration;
-        resources.loadDir('office-cast', JsonAsset, async (error, assets) => {
-            if (!this.isValid || token !== this.catalogGeneration) return;
+        void (async () => {
             try {
-                if (error) throw error;
-                const roles = ['manager', 'veteran', 'rookie'];
-                const catalog = assets.map(asset => asset.json as CastManifest).filter(m => m.schemaVersion === 1 && roles.includes(m.source?.roleId));
-                if (!catalog.length) throw new Error('No usable office character manifest');
+                const catalog = await Promise.all(ROLE_IDS.map(role => new Promise<CastManifest>((resolve, reject) => {
+                    resources.load(castResource(role).manifestPath, JsonAsset, (error, asset) => {
+                        if (error) { reject(error); return; }
+                        if (!this.isValid || token !== this.catalogGeneration) { reject(new Error('Catalog owner disposed')); return; }
+                        if (!this.ownedAssets.has(asset)) { asset.addRef(); this.ownedAssets.add(asset); }
+                        resolve(asset.json as CastManifest);
+                    });
+                })));
+                if (!this.isValid || token !== this.catalogGeneration) return;
+                const validated = createCastCatalog(catalog);
                 const textures = new Map<RoleId, Texture2D>();
                 for (const manifest of catalog) {
                     const refs = manifest.generated?.imports;
@@ -279,25 +306,25 @@ export class SlapGame extends Component {
                     if (!this.isValid || token !== this.catalogGeneration) return;
                     textures.set(manifest.source.roleId, texture);
                 }
-                catalog.sort((a, b) => roles.indexOf(a.source.roleId) - roles.indexOf(b.source.roleId));
-                this.cast = catalog; this.roleTextures = textures; this.castError = '';
+                this.cast = catalog; this.catalog = validated; this.roleTextures = textures; this.castError = '';
             } catch (failure) {
                 if (!this.isValid || token !== this.catalogGeneration) return;
-                this.cast = []; this.castError = failure instanceof Error ? failure.message : 'Character loading failed'; console.error(this.castError);
+                this.cast = []; this.catalog = null; this.castError = failure instanceof Error ? failure.message : 'Character loading failed'; console.error(this.castError);
             }
             if (this.page === 'menu') this.renderPage();
-        });
+        })();
     }
 
     private clearActors(): void {
         this.pendingSkinState = null; this.pendingPoses = null; this.characterView.clear();
     }
 
-    private async prepareActors(token: number): Promise<void> {
-        const manifests = [this.selectedRole, this.opponentRole].map(role => this.cast.find(m => m.source.roleId === role));
+    private async prepareActors(ticket: RoundTicket): Promise<void> {
+        const setup = ticket.setup;
+        const manifests = setup.actors.map(actor => this.cast.find(m => m.source.roleId === actor.roleId && m.generated.sourceHash === actor.sourceHash));
         if (manifests.some(m => !m)) throw new Error(this.castError || 'Character assets are still loading');
         const templates = await Promise.all(manifests.map(m => this.loadAsset<Prefab>(m!.generated.imports.prefabUuid)));
-        if (!this.isValid || token !== this.loadGeneration) return;
+        if (!this.isValid || !this.roundGate.isCurrent(ticket) || setup !== this.roundSetup) return;
         this.clearActors();
         this.characterView.prepare(this.world, manifests as CastManifest[], templates);
     }
@@ -416,6 +443,81 @@ export class SlapGame extends Component {
 
     private changePage(page: Page): void { this.page = page; this.renderPage(); }
 
+    private portrait(role: RoleId, x: number, y: number, size: number): void {
+        const texture = this.roleTextures.get(role);
+        if (!texture) return;
+        const node = this.uiNode('CharacterPortrait', x, y, size, size);
+        const sprite = node.addComponent(Sprite), frame = new SpriteFrame();
+        frame.texture = texture; sprite.spriteFrame = frame; sprite.sizeMode = Sprite.SizeMode.CUSTOM;
+        // Attaching Sprite first resets the transform to the source texture's512px size.
+        node.getComponent(UITransform)!.setContentSize(size, size);
+        this.portraitFrames.push(frame);
+    }
+
+    private selectionUI(): void {
+        this.text('掌上对决', 0, this.landscape ? 300 : 540, 660, 56);
+        this.text('选择你的人设', 0, this.landscape ? 240 : 455, 640, 40);
+        const cardY = this.landscape ? 70 : 190;
+        for (let i = 0; i < this.cast.length; i++) {
+            const role = this.cast[i], id = role.source.roleId, selected = id === this.selectedRole;
+            const x = (i - 1) * (this.landscape ? 390 : 228), width = this.landscape ? 350 : 212;
+            this.button('', x, cardY, width, () => { this.selectedRole = id; this.renderPage(); }, false,
+                this.landscape ? 280 : 400, selected ? 'selected' : 'normal');
+            this.portrait(id, x, cardY + (this.landscape ? 52 : 68), this.landscape ? 144 : 176);
+            this.text(`${role.source.displayName}${selected ? ' · 已选' : ''}`, x, cardY - (this.landscape ? 34 : 48), width - 12, 24, selected ? C.gold : C.ink, 42);
+            this.text(role.source.facets.positive, x, cardY - (this.landscape ? 90 : 125), width - 24, 24, C.ink, this.landscape ? 100 : 124);
+        }
+        if (!this.catalog) {
+            this.text(this.castError ? '人设载入失败，请重试。' : '正在载入三个人设…', 0, 100, 640, 32);
+            if (this.castError) this.button('重试载入', 0, -20, 440, () => this.loadCast(), true);
+        }
+        const y = this.landscape ? -140 : -100;
+        this.button(`蓄力出掌${this.mode === 'charge' ? ' · 已选' : ''}`, -168, y, 312, () => { this.mode = 'charge'; this.renderPage(); }, false, 80, this.mode === 'charge' ? 'selected' : 'normal');
+        this.button(`点击出掌${this.mode === 'tap' ? ' · 已选' : ''}`, 168, y, 312, () => { this.mode = 'tap'; this.renderPage(); }, false, 80, this.mode === 'tap' ? 'selected' : 'normal');
+        if (!this.landscape) this.text('轻掌伤害1 · 按住1.2秒蓄满伤害2\n人物长处不改变攻防数值。', 0, -185, 640, 24, C.ink, 64);
+        const opponent = this.cast.find(m => m.source.roleId === this.opponentRole);
+        this.button(`对手：${opponent?.source.displayName ?? '准备中'} · 换人`, this.landscape ? -420 : 0, this.landscape ? -240 : -260, this.landscape ? 350 : 520, () => {
+            const index = ROLE_IDS.indexOf(this.opponentRole); this.opponentRole = ROLE_IDS[(index + 1) % ROLE_IDS.length]; this.renderPage();
+        }, false, 64);
+        const startY = this.landscape ? -240 : -355;
+        if (this.catalog) {
+            this.button('开始对战', 0, startY, this.landscape ? 400 : 520, () => this.begin('normal'), true);
+            this.button('练习攻防', this.landscape ? 420 : 0, this.landscape ? startY : -465, this.landscape ? 350 : 520, () => this.changePage('practice'));
+        } else {
+            this.panel(0, startY, this.landscape ? 400 : 520, 96, '#1D2C35');
+            this.text('等待人设准备', 0, startY, this.landscape ? 380 : 500, 32, C.ink, 88);
+        }
+    }
+
+    /** Both diagnostic viewers render these exact cards; input ownership stays actor0. */
+    private introUI(): void {
+        if (!this.roundSetup) { this.startupError = '本局人设尚未锁定'; this.page = 'error'; this.renderPage(); return; }
+        const cards = projectIntro(this.roundSetup, this.introViewer);
+        this.text('对局前 · 职场往事', 0, this.landscape ? 300 : 520, 680, this.landscape ? 40 : 56);
+        for (const card of cards) {
+            const mine = card.actorId === this.introViewer;
+            const position = mine ? 0 : 1;
+            const x = this.landscape ? (position === 0 ? -306 : 306) : 0;
+            const y = this.landscape ? 45 : position === 0 ? 240 : -100;
+            this.panel(x, y, this.landscape ? 568 : 664, this.landscape ? 380 : 300);
+            this.text(mine ? '你眼中的自己' : '这位对手的职场往事', x, y + (this.landscape ? 145 : 112), 540, 32, mine ? C.blue : C.orange, 50);
+            this.portrait(card.roleId, x - (this.landscape ? 170 : 222), y - 12, this.landscape ? 180 : 176);
+            this.text(`${card.displayName} · ${mine ? '你' : '对手'}`, x + (this.landscape ? 88 : 84), y + (this.landscape ? 65 : 45), this.landscape ? 326 : 430, 32, mine ? C.blue : C.orange, 56);
+            this.text(card.text, x + (this.landscape ? 88 : 84), y - (this.landscape ? 75 : 55), this.landscape ? 308 : 420, 32, C.ink, this.landscape ? 200 : 150);
+        }
+        this.button('进入对局', this.landscape ? 170 : 0, this.landscape ? -245 : -400, 520, () => this.enterBattle(), true);
+        this.button('返回选择', this.landscape ? -430 : 0, this.landscape ? -245 : -510, this.landscape ? 300 : 520, () => this.backToMenu());
+    }
+
+    private publishCastDiagnostics(): void {
+        if (!this.motionDiagnosticCanvas) return;
+        this.motionDiagnosticCanvas.setAttribute('data-slap-cast', JSON.stringify({ build: BUILD_ID, page: this.page,
+            mode: this.mode, practice: this.practice, setup: this.roundSetup, selectedRole: this.selectedRole,
+            opponentRole: this.opponentRole, viewerActorId: this.introViewer, controlledActorId: 0,
+            intro: this.roundSetup ? projectIntro(this.roundSetup, this.introViewer) : null,
+            state: this.session?.snapshot() ?? null, cast: this.skinEvidence(), generation: this.loadGeneration }));
+    }
+
     private renderPage(): void {
         for (const child of [...this.ui.children]) child.destroy();
         for (const frame of this.portraitFrames) frame.destroy();
@@ -430,36 +532,12 @@ export class SlapGame extends Component {
         if (this.page !== 'result') this.panel(0, 0, this.width, this.height, C.bg);
         const top = this.landscape ? 260 : 500;
         if (this.page === 'menu') {
-            this.text('掌上对决', 0, top, 660, 56);
-            this.text('选择你的出掌方式', 0, top - (this.landscape ? 80 : 90), 640, 40, C.ink, 56);
-            this.text(`轻击伤害${DEFAULT_RULES.baseDamage}；按住${DEFAULT_RULES.fullChargeMs / 1000}秒蓄满伤害${DEFAULT_RULES.chargedDamage}。\n满蓄力后松手出掌。`, 0, top - (this.landscape ? 150 : 180), 640, 24, C.ink, 72);
-            const roleX = this.landscape ? -470 : 80, roleY = this.landscape ? 50 : 222;
-            const role = this.cast.find(m => m.source.roleId === this.selectedRole);
-            const texture = this.roleTextures.get(this.selectedRole);
-            if (texture) {
-                const portrait = this.uiNode('CharacterPortrait', this.landscape ? -470 : -230, this.landscape ? 135 : 208, 144, 144);
-                const sprite = portrait.addComponent(Sprite), frame = new SpriteFrame(); frame.texture = texture;
-                sprite.spriteFrame = frame; sprite.sizeMode = Sprite.SizeMode.CUSTOM; this.portraitFrames.push(frame);
-            }
-            const cycle = (opponent: boolean) => {
-                if (!this.cast.length) return;
-                const id = opponent ? this.opponentRole : this.selectedRole;
-                const next = this.cast[(this.cast.findIndex(m => m.source.roleId === id) + 1) % this.cast.length].source.roleId;
-                if (opponent) this.opponentRole = next; else this.selectedRole = next;
-                this.renderPage();
-            };
-            this.button(role ? `你：${role.source.displayName} · 换人` : this.castError ? '人设载入失败 · 重试' : '正在载入人设…', roleX, roleY, this.landscape ? 240 : 390,
-                () => this.castError ? this.loadCast() : cycle(false), false, 64);
-            const opponent = this.cast.find(m => m.source.roleId === this.opponentRole);
-            this.button(`对手：${opponent?.source.displayName ?? '准备中'} · 换人`, roleX, roleY - 80, this.landscape ? 240 : 390, () => cycle(true), false, 64);
-            const y = this.landscape ? 0 : 40;
-            this.button(`蓄力出掌${this.mode === 'charge' ? ' · 已选' : ''}`, -168, y, 312, () => { this.mode = 'charge'; this.renderPage(); }, false, 96, this.mode === 'charge' ? 'selected' : 'normal');
-            this.button(`点击出掌${this.mode === 'tap' ? ' · 已选' : ''}`, 168, y, 312, () => { this.mode = 'tap'; this.renderPage(); }, false, 96, this.mode === 'tap' ? 'selected' : 'normal');
-            this.button('开始对战', 0, y - 128, 520, () => this.begin('normal'), true);
-            this.button('练习攻防', 0, y - 248, 520, () => this.changePage('practice'));
+            this.selectionUI();
         } else if (this.page === 'practice') {
             this.text('练习攻防', 0, top, 640, 56);
             this.text('固定节奏，同一套规则。\n读懂前摇，再抓住时机。', 0, top - 100, 640, 24, C.ink, 96);
+            const selected = this.cast.find(m => m.source.roleId === this.selectedRole);
+            this.text(`你的人设：${selected?.source.displayName ?? ''}`, 0, top - (this.landscape ? 150 : 190), 640, 32, C.blue, 40);
             const y = this.landscape ? 35 : 150;
             this.button('命中练习', 0, y, 520, () => this.begin('hit'), true);
             this.button('格挡练习', 0, y - 112, 520, () => this.begin('block'));
@@ -468,10 +546,12 @@ export class SlapGame extends Component {
         } else if (this.page === 'loading') {
             this.text('正在准备对战…', 0, 0, 640, 40);
             this.button('返回选择', 0, -120, 520, () => this.backToMenu());
+        } else if (this.page === 'intro') {
+            this.introUI();
         } else if (this.page === 'error') {
             this.text('对战未能启动', 0, 100, 640, 40);
-            this.text('请返回选择后重试。', 0, 20, 640, 32);
-            this.button('返回选择', 0, -110, 520, () => this.changePage('menu'), true);
+            this.text(this.startupError || '角色资源未能准备，请返回选择后重试。', 0, 20, 640, 32, C.ink, 100);
+            this.button('返回选择', 0, -130, 520, () => this.backToMenu(), true);
         } else if (this.page === 'paused' || this.page === 'confirm') {
             this.text(this.page === 'paused' ? '已暂停' : '放弃这局？', 0, 150, 640, 56);
             this.text(this.page === 'paused' ? '准备好再继续。' : '本局进度不会保留。', 0, 50, 640, 32);
@@ -489,7 +569,7 @@ export class SlapGame extends Component {
             const state = this.session!.snapshot();
             this.text(`剩余生命  ${state.fighters[0].hp} : ${state.fighters[1].hp}`, 0, headingY - 64, 640, 32);
             if (!this.landscape) this.text(this.mode === 'charge' ? '本局：蓄力出掌' : '本局：点击出掌', 0, headingY - 116, 640, 24);
-            this.button(this.practice === 'normal' ? '再来一局' : '重试练习', this.landscape ? -290 : 0, footerY, this.landscape ? 420 : 520, () => this.begin(this.practice), true);
+            this.button(this.practice === 'normal' ? '再来一局' : '重试练习', this.landscape ? -290 : 0, footerY, this.landscape ? 420 : 520, () => this.begin(this.practice, true), true);
             this.button('换个人设', this.landscape ? 290 : 0, this.landscape ? footerY : footerY - 120, this.landscape ? 420 : 520, () => this.backToMenu());
         }
         const buildLabel = BUILD_ID.split('-').slice(0, 3).join('-');
@@ -504,7 +584,8 @@ export class SlapGame extends Component {
         const hpX = this.landscape ? 420 : 190;
         for (let i = 0; i < 2; i++) {
             const x = i === 0 ? -hpX : hpX;
-            this.hpLabels.push(this.text(i === 0 ? '你  5/5' : '机器人  5/5', x, top, 260, 32, i === 0 ? C.blue : C.orange));
+            this.hpLabels.push(this.text(`${i === 0 ? '你' : '机器人'}  5/5`, x, top, 260, 32, i === 0 ? C.blue : C.orange));
+            this.text(this.roundSetup?.actors[i].displayName ?? '', x, top + 40, 300, 24, i === 0 ? C.blue : C.orange, 40);
             this.hpBars.push(this.panel(x, top - 48, 240, 16));
         }
         this.button('暂停', 0, top - 12, 112, () => this.pause(), false, 96);
@@ -525,13 +606,27 @@ export class SlapGame extends Component {
         if (this.practice !== 'normal') {
             const hints = { hit: `命中练习：轻击伤害${DEFAULT_RULES.baseDamage}，蓄满伤害${DEFAULT_RULES.chargedDamage}`, block: '格挡练习：来掌前提前按防御', parry: '精准反击练习：贴近命中再按防御' };
             this.text(hints[this.practice], 0, this.landscape ? top - 116 : top - 160, this.landscape ? 580 : 640, 24, C.ink, 48);
-            this.button('重试练习', this.landscape ? 470 : 0, top - (this.landscape ? 116 : 256), 260, () => this.begin(this.practice));
+            this.button('重试练习', this.landscape ? 470 : 0, top - (this.landscape ? 116 : 256), 260, () => this.begin(this.practice, true));
         } else this.text('提前按可格挡，贴近命中时按可反击', 0, this.landscape ? -190 : -312, this.landscape ? 580 : 640, 24, C.ink, 48);
         if (this.session) this.drawState(this.session.snapshot());
     }
 
-    private begin(practice: Practice): void {
-        if (this.page === 'loading') return;
+    private begin(practice: Practice, retry = false): void {
+        if (this.page === 'loading' || this.page === 'intro') return;
+        let ticket: RoundTicket | null;
+        try {
+            if (!this.catalog) throw new Error('人设资源尚未准备，请返回后重试。');
+            const playerRoleId = (this.diagnosticRole ?? this.selectedRole) as RoleId;
+            this.diagnosticRole = null;
+            ticket = retry ? this.roundGate.retry() : this.roundGate.start(makeRoundSetup(this.catalog, {
+                playerRoleId, opponentRoleId: this.opponentRole, mode: this.mode,
+            }));
+            if (!ticket) return;
+        } catch (error) {
+            this.startupError = '所选人设暂不可用，请返回重新选择。'; this.changePage('error'); return;
+        }
+        this.roundSetup = ticket.setup;
+        this.mode = ticket.setup.mode;
         this.bridge.cancelAll();
         this.session?.pause(); this.session = null;
         this.clearActors(); this.motion.reset(); this.seenEvents.clear(); this.trace = [];
@@ -540,29 +635,35 @@ export class SlapGame extends Component {
         this.resultVisualMs = 0; this.skipVisualFrame = false;
         this.practice = practice;
         const token = ++this.loadGeneration;
+        this.startupError = '';
         this.changePage('loading');
         this.scheduleOnce(async () => {
             try {
-                if (!this.isValid || token !== this.loadGeneration) return;
+                if (!this.isValid || token !== this.loadGeneration || !this.roundGate.isCurrent(ticket!)) return;
                 // Explicit Web-only fault injection exercises the real catch and
                 // retry path without manufacturing a battle or its result.
                 if (this.diagnosticStart === 'fail-once' && !this.diagnosticStartFailed) {
                     this.diagnosticStartFailed = true;
                     throw new Error('Diagnostic one-time session initialization failure');
                 }
-                await this.prepareActors(token);
-                if (!this.isValid || token !== this.loadGeneration) return;
-                this.session = new LocalSession({ sessionId: `local-${++this.round}`, mode: this.mode, practice, seed: 104729 });
-                this.clockMs = 0; this.sequence = 0;
-                this.resultVisualMs = 0; this.skipVisualFrame = false;
-                this.motion.reset(this.session.snapshot().sessionId);
-                this.motionSamples = [];
-                this.clearContactFrames();
-                this.seenEvents.clear(); this.trace = []; this.feedback = ''; this.feedbackUntil = 0;
-                if (this.hidden) { this.session.pause(); this.changePage('paused'); }
-                else this.changePage('battle');
-            } catch (error) { if (this.isValid && token === this.loadGeneration) { this.clearActors(); console.error('Slap game session initialization failed', error); this.changePage('error'); } }
+                await this.prepareActors(ticket!);
+                if (!this.isValid || token !== this.loadGeneration || !this.roundGate.isCurrent(ticket!)) return;
+                this.changePage('intro');
+            } catch (error) { if (this.isValid && token === this.loadGeneration && this.roundGate.isCurrent(ticket!)) {
+                this.clearActors(); this.startupError = '角色资源未能准备，请返回选择后重试。';
+                console.error('Slap game session initialization failed', error); this.changePage('error');
+            } }
         }, this.diagnosticStart === 'slow' ? 2 : 0.05);
+    }
+
+    private enterBattle(): void {
+        if (this.page !== 'intro' || !this.roundSetup || this.characterView.count !== 2) return;
+        this.bridge.cancelAll();
+        this.session = new LocalSession({ sessionId: `local-${++this.round}`, mode: this.roundSetup.mode, practice: this.practice, seed: 104729 });
+        this.clockMs = 0; this.sequence = 0; this.resultVisualMs = 0; this.skipVisualFrame = false;
+        this.motion.reset(this.session.snapshot().sessionId); this.motionSamples = []; this.clearContactFrames();
+        this.seenEvents.clear(); this.trace = []; this.feedback = ''; this.feedbackUntil = 0;
+        if (this.hidden) { this.session.pause(); this.changePage('paused'); } else this.changePage('battle');
     }
 
     private submit(action: ActionKind): void {
@@ -604,6 +705,7 @@ export class SlapGame extends Component {
     }
     private backToMenu(): void {
         ++this.loadGeneration;
+        this.roundGate.clear(); this.roundSetup = null;
         this.bridge.cancelAll(); this.session?.pause(); this.session = null;
         this.clearActors();
         this.resultVisualMs = 0; this.skipVisualFrame = false;
@@ -628,6 +730,7 @@ export class SlapGame extends Component {
         this.frameMaxDtMs = this.frameMaxDtMs === null ? dtMs : Math.max(this.frameMaxDtMs, dtMs);
         this.frameRecentDtMs.push(dtMs);
         if (this.frameRecentDtMs.length > 120) this.frameRecentDtMs.shift();
+        this.publishCastDiagnostics();
         if (this.ready && this.session && this.page === 'result') {
             if (!this.hidden) {
                 if (this.skipVisualFrame) this.skipVisualFrame = false;
@@ -720,10 +823,11 @@ export class SlapGame extends Component {
     }
 
     onDestroy(): void {
-        ++this.loadGeneration; ++this.catalogGeneration; this.clearActors();
+        ++this.loadGeneration; ++this.catalogGeneration; this.roundGate.clear(); this.roundSetup = null; this.clearActors();
         for (const frame of this.portraitFrames) frame.destroy();
         this.frameDiagnosticCanvas?.removeAttribute('data-slap-diagnostics');
         this.motionDiagnosticCanvas?.removeAttribute('data-slap-motion');
+        this.motionDiagnosticCanvas?.removeAttribute('data-slap-cast');
         if (this.motionDiagnosticCanvas) director.off(Director.EVENT_AFTER_DRAW, this.captureContactFrame, this);
         this.clearContactFrames();
         input.off(Input.EventType.TOUCH_START, this.touchStart, this);
@@ -735,6 +839,8 @@ export class SlapGame extends Component {
         this.motion.reset();
         for (const mesh of this.meshes) mesh.destroy();
         for (const material of this.materials) material.destroy();
+        for (const asset of this.ownedAssets) asset.decRef();
+        this.ownedAssets.clear(); this.loadingAssets.clear(); this.roleTextures.clear();
         delete (globalThis as unknown as Record<string, unknown>).__SLAP_DEBUG__;
     }
 }
