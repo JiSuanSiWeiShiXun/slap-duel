@@ -6,7 +6,7 @@
 
 ## 固定制作合同
 
-- Blender **4.5.14 LTS**，官方 Windows x64 portable；沿用项目内已核验的安装与 SHA256 回执，不复制或下载另一套工具。
+- Blender **4.5.14 LTS**，官方 Windows x64 portable；本次沿用项目内已核验的安装与 SHA256 回执，不复制或下载另一套工具。官方归档为 [blender-4.5.14-windows-x64.zip](https://download.blender.org/release/Blender4.5/blender-4.5.14-windows-x64.zip)，ZIP SHA256 为 `b9533d2397ac1984db4466fb23a7a4649391cca93f6e84209f9bcc60d071c8b9`。可复现环境需要相同版本放入 `game/local/toolchain/blender-4.5.14-windows-x64/`，并保留本机核验回执 `game/local/toolchain/blender-receipt.json`；回执不公开。
 - Cocos Creator **3.8.8**，使用已安装的 FBX converter 和真实编辑器导入。
 - 生成器 SHA256：`abd8f3d38e0735c59e427cae2bca1c3436cb72aa1415e07f4b3a55407630711e`。检查器拒绝生成器字节变更。
 - `sourceHash = SHA256(完整生成器字节 + UTF-8规范化source JSON)`；递归排序键、无空格、不转义中文。`generated` 不参与哈希。
@@ -63,7 +63,7 @@ node tools/check-public-tree.mjs
 
 随后只调用**原项目冻结脚本**的受控 `--source-root/--output-root` 模式重生三人 FBX、同源 PNG 与副本 blend；不执行副本生成器。全新缓存导入由副本的真实 `build-game.ps1 -Target web-desktop` 完成。初导造成输入指纹变化时，保留失败回执、同步真实 import/meta，再稳定构建；不跳过指纹保护。
 
-每个副本保留 `rebuild-report.json`：公开输入逐文件 hash、生成器退出码、复制前无旧缓存事实、每次 Creator 构建日志、稳定 build manifest、三人独立 bindPose 与引用检查。`runtimePassed` 初始为 false；生成、导入和构建成功不会自动把实际运行写成通过。按返回副本路径使用其 `tools/serve.mjs --port 7457` 提供本地 Web，实际选择三人并观察代表轻击、普通格挡和两段反击，再保存运行证据。
+每个副本保留 `rebuild-report.json`：公开输入逐文件 hash、生成器退出码、复制前无旧缓存事实、每次 Creator 构建日志、稳定 build manifest、三人独立 bindPose 与引用检查。报告另列新生成的模型/原生源/cache/build 文件及 path/大小/hash，并单列被制作器或 Creator 改写的已复制文件前后 hash。`runtimePassed` 初始为 false；生成、导入和构建成功不会自动把实际运行写成通过。按返回副本路径使用其 `tools/serve.mjs --port 7457` 提供本地 Web，实际选择三人并观察代表轻击、普通格挡和两段反击，再保存运行证据。
 
 造型修改应在 manifest.source 支持的合法参数内进行，并依次完成生成、Creator 导入、Web 构建、立绘与皮肤直接查看。恢复源值之后同样真实重建和查看。临时 sourceHash 与固定 FK fixture 不一致是预期保护，不能永久放宽断言。最终参数、meta UUID、文件检查与公开扫描必须恢复有效。
 
@@ -72,6 +72,24 @@ node tools/check-public-tree.mjs
 2026-11-07 使用 `node tools/check-character-assets.mjs --rebuild --name phase2-09-clean-final-20261107` 实际重生三人。副本复制 89 个白名单输入，复制前 library/temp/build/local/profiles 均不存在；三次生成退出码 0，首次真实 Creator 导入与 Web 构建退出码 36，wrapper 成功。稳定构建为 `P1-b25a9a0-d4789a78-20261107T143053867Z`；新产物严格二进制政策及复制前后完整 import 身份比较通过。
 
 390×844 桌面原生输入实际选择三人进入介绍与对战，每人实际 renderer=1、joints=29；manager 蓄力模式短掌伤害 1，veteran 点击模式普通格挡伤害 0，rookie 精准格挡在 1680ms 伤害 0、1860ms 反掌伤害 1。原始立绘及连续反击画面已直接查看。首次 rookie 防御按早了，正确得到普通格挡，仅重试进入精准窗口的案例计作反击通过。运行证据与回执保持在本地私有目录。
+
+## 已执行的造型往返
+
+只修改 manager 的合法 `source.appearance.hair`：`swept → receding → swept`，每步使用冻结原脚本重新生成 FBX、PNG 和本地 `.blend`，并真实 Creator 重导入与 Web 构建。
+
+| 阶段 | 构建 | 可见与源结果 |
+|---|---|---|
+| before | `P1-b2fd9b5-93107ead-20261107T135616326Z` | 原高扫发，sourceHash 为上表 manager 值 |
+| changed | `P1-ea94213-56dc291e-20261107T143712217Z` | 立绘及真实 skin 同时变为平滑退发轮廓；sourceHash `46fec669326b2cbf43e7d1b5098545a9ce0eb637581a8b1e55849a9fd65d9410`；3150 顶点/5652 三角 |
+| restored | `P1-ea94213-55960c02-20261107T144236754Z` | 立绘及真实 skin 回到原高扫发；sourceHash 恢复，3231 顶点/5802 三角 |
+
+changed 实际验证了蓄力短掌 1、满掌 2、点击短掌 1，以及两种输入各自的 parry 零伤害→180ms 后独立 counter-hit 伤害 1。每种反击的 catch/dip/rise/hit 四帧均直接查看。veteran 的实际外形与眼镜未误变，veteran/rookie 的五份资源文件逐字节不变。
+
+restored 再次实际验证相同双输入伤害与两段反击，并查看恢复后的立绘和真实 skin；默认 fresh 1280×720 进入练习、加载后切换到 390×844 再返回选角也实际通过。一次恢复版精准输入因到达窗口偏差失败，原件保留，仅成功重试计通过。创建页面后立即改尺寸的启动过渡图不计稳定通过；本人采用前仍保留候选构建的 fresh/loading-resize 检查。
+
+所有阶段保留原 model/prefab/Skeleton、13 clip、portrait UUID 与骨路径；同步导入后逐项比较复制前的身份基线。恢复后的 PNG 逐字节回到原值，真实转换 glTF/bin 几何也与干净原版副本逐字节相等；FBX 容器全文件 hash 会变化，因此不把 FBX 全文件相等当作唯一恢复依据。三份本地 `.blend` 已在固定 Blender 4.5.14 中重新打开，均有 29 骨、29 权重组、一个 Armature modifier 和 `OfficeCombatTimeline`。
+
+恢复阶段曾遇 Windows 待删除构建文件。失败回执与部分输出保留，停止原本地服务后残留文件释放，只隔离已失败的生成目录，再从空输出成功构建。成功构建复用了相同输入指纹先前分配的 ID，实际成功的 manifest 时间和 Creator 36 回执单独记录，失败尝试不计通过。
 
 ## 验证边界
 

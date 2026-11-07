@@ -73,6 +73,15 @@ test('import synchronization cannot absorb a changed stable UUID', async () => {
   assert.doesNotThrow(() => assertStableImports(baseline, structuredClone(baseline)));
   assert.throws(() => assertStableImports(baseline, { ...baseline, modelUuid: 'changed' }), /identity drifted/);
 });
+test('private output receipt lists new artifacts and excludes copied inputs', async t => {
+  const { generatedInventory } = await api, dir = fixture(t);
+  const copied = ['game/assets/resources/office-cast/manager/manifest.json'];
+  const actual = generatedInventory(dir, copied);
+  assert(!actual.some(v => copied.includes(v.path)));
+  const fbx = actual.find(v => v.path === 'game/assets/resources/office-cast/manager/character.fbx');
+  assert(fbx.bytes > 0 && /^[a-f0-9]{64}$/.test(fbx.sha256));
+  assert.throws(() => generatedInventory(root), /isolated copies/);
+});
 test('copy whitelist excludes generated binaries, private identity, caches and portable', async () => {
   const { isCopyInput } = await api;
   for (const file of ['game/assets/scripts/SlapGame.ts', 'game/assets/resources/office-cast/manager/manifest.json', 'game/assets/resources/office-cast/manager/character.fbx.meta', 'tools/build-game.ps1']) assert.equal(isCopyInput(file), true, file);

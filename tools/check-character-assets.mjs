@@ -157,6 +157,27 @@ export function checkProduction(sourceRoot = ROOT) {
 export function assertStableImports(baseline, current) {
   equal(current, baseline, 'Creator UUID/bone/clip identity drifted from copied source');
 }
+/** Private receipt of exactly what the isolated generator/Creator actually produced. */
+export function generatedInventory(sourceRoot, copiedPaths = []) {
+  const root = controlledRoot(sourceRoot);
+  assert(root !== ROOT, 'Generated inventory is restricted to isolated copies');
+  const copied = new Set(copiedPaths), files = [];
+  function visit(directory) {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const file = safePath(ROOT, path.join(directory, entry.name));
+      assert(!entry.isSymbolicLink(), 'Generated symlink/junction rejected');
+      if (entry.isDirectory()) visit(file);
+      else {
+        assert(entry.isFile(), 'Generated non-file rejected');
+        const name = path.relative(root, file).replaceAll('\\', '/');
+        if (copied.has(name) || name === 'rebuild-report.json') continue;
+        const bytes = fs.readFileSync(file); files.push({ path: name, bytes: bytes.length, sha256: sha(bytes) });
+      }
+    }
+  }
+  visit(root);
+  return files;
+}
 export function rebuild(name) {
   frozenBytes();
   validateCast();
@@ -190,6 +211,11 @@ export function rebuild(name) {
       if (result.exitCode === 0 && !changed) {
         for (const role of ROLES) assertStableImports(importBaseline[role], readAt(target, `game/assets/resources/office-cast/${role}/manifest.json`).generated.imports);
         report.identity = checkProduction(target); report.binaryPrivacyPolicyPassed = true; report.stableImportIdentityPassed = true;
+        report.generatedFiles = generatedInventory(target, report.copyInputs.map(v => v.path));
+        report.modifiedCopyInputs = report.copyInputs.map(record => {
+          const bytes = fs.readFileSync(safePath(ROOT, path.join(target, record.path)));
+          return { path: record.path, beforeSha256: record.sha256, sha256: sha(bytes), bytes: bytes.length };
+        }).filter(record => record.beforeSha256 !== record.sha256);
         report.build = readAt(target, 'game/build/web-desktop/build-manifest.json'); report.technicalPassed = true; report.finishedAt = new Date().toISOString(); save(); return report;
       }
     }
