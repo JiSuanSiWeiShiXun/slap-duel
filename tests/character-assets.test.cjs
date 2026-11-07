@@ -7,6 +7,11 @@ const { pathToFileURL } = require('node:url');
 const root = path.resolve(__dirname, '..');
 const api = import(pathToFileURL(path.join(root, 'tools/check-character-assets.mjs')).href);
 const fixtures = path.join(root, 'game/local/asset-rebuild');
+function removeFixture(dir) {
+  const absolute = path.resolve(dir);
+  assert(absolute.startsWith(path.resolve(fixtures) + path.sep));
+  fs.rmSync(absolute, { recursive: true });
+}
 function fixture(t) {
   fs.mkdirSync(fixtures, { recursive: true });
   const dir = fs.mkdtempSync(path.join(fixtures, 'test-'));
@@ -16,7 +21,7 @@ function fixture(t) {
     for (const name of ['manifest.json', 'character.fbx', 'character.fbx.meta', 'portrait.png', 'portrait.png.meta'])
       fs.copyFileSync(path.join(root, relative, name), path.join(dir, relative, name));
   }
-  t.after(() => fs.rmSync(dir, { recursive: true }));
+  t.after(() => removeFixture(dir));
   return dir;
 }
 function mutate(dir, role, fn, name = 'manifest.json') {
@@ -62,7 +67,7 @@ test('copy whitelist excludes generated binaries, private identity, caches and p
 test('fresh target refuses overwrite and escaping names', async t => {
   const { createRebuildTarget } = await api;
   const name = `test-target-${crypto.randomUUID()}`, dir = createRebuildTarget(name);
-  t.after(() => fs.rmSync(dir, { recursive: true }));
+  t.after(() => removeFixture(dir));
   assert.throws(() => createRebuildTarget(name), /exist|overwrite/i);
   for (const bad of ['../escape', '/outside', 'nested/name', '.hidden']) assert.throws(() => createRebuildTarget(bad));
 });
@@ -70,7 +75,9 @@ test('rejects a junction before traversal or write', async t => {
   const { safePath } = await api;
   fs.mkdirSync(fixtures, { recursive: true });
   const dir = fs.mkdtempSync(path.join(fixtures, 'test-links-'));
-  t.after(() => fs.rmSync(dir, { recursive: true }));
+  t.after(() => removeFixture(dir));
   fs.symlinkSync(path.join(root, 'docs'), path.join(dir, 'link'), 'junction');
   assert.throws(() => safePath(root, path.join(dir, 'link/public')), /link|junction/i);
+  fs.symlinkSync(path.dirname(root), path.join(dir, 'escape'), 'junction');
+  assert.throws(() => safePath(root, path.join(dir, 'escape/outside')), /link|junction/i);
 });
