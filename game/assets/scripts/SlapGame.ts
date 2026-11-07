@@ -33,6 +33,8 @@ export class SlapGame extends Component {
     private practice: Practice = 'normal';
     private session: LocalSession | null = null;
     private clockMs = 0;
+    private resultVisualMs = 0;
+    private skipVisualFrame = false;
     private sequence = 0;
     private round = 0;
     private ui!: Node;
@@ -88,9 +90,10 @@ export class SlapGame extends Component {
     private frameRecentDtMs: number[] = [];
     private frameDiagnosticCanvas: HTMLElement | null = null;
     private motionDiagnosticCanvas: HTMLElement | null = null;
-    private motionSamples: { nowMs: number; poses: [FighterPose, FighterPose]; actual: { leadPalm: Point; rearPalm: Point; cheek: Point; head: Point }[] }[] = [];
+    private motionSamples: { nowMs: number; visualElapsedMs: number; poses: [FighterPose, FighterPose]; actual: { leadPalm: Point; rearPalm: Point; cheek: Point; head: Point }[] }[] = [];
     private motionFrameState: BattleState | null = null;
     private contactFrames: ContactFrame[] = [];
+    private resultFrames: { stage: string; state: BattleState; visualElapsedMs: number; cast: ReturnType<CharacterView['evidence']>; width: number; height: number; image?: string; error?: string }[] = [];
     private framePublishedWallMs = -Infinity;
     private diagnosticStart: 'slow' | 'fail-once' | null = null;
     private diagnosticStartFailed = false;
@@ -123,7 +126,7 @@ export class SlapGame extends Component {
         (globalThis as unknown as Record<string, unknown>).__SLAP_DEBUG__ = {
             build: BUILD_ID,
             inspect: () => ({ page: this.page, mode: this.mode, practice: this.practice,
-                state: this.session?.snapshot() ?? null, events: this.trace.map(e => ({ ...e })), cast: this.skinEvidence(),
+                state: this.session?.snapshot() ?? null, visualElapsedMs: this.resultVisualMs, events: this.trace.map(e => ({ ...e })), cast: this.skinEvidence(),
                 frames: this.frameDiagnostics() }),
         };
     }
@@ -138,6 +141,7 @@ export class SlapGame extends Component {
 
     /** Capture the engine's actual canvas after drawing, only with the explicit diagnostic query. */
     private captureContactFrame(): void {
+        if (this.page === 'result') { this.captureResultFrame(); return; }
         if (!this.motionDiagnosticCanvas || this.page !== 'battle' || this.contactFrames.length >= 5 || !this.motionFrameState) return;
         const state = this.motionFrameState;
         let stage: ContactFrame['stage'] | null = null, actorId = -1;
@@ -170,6 +174,22 @@ export class SlapGame extends Component {
     private clearContactFrames(): void {
         this.motionFrameState = null; this.contactFrames = [];
         this.motionDiagnosticCanvas?.removeAttribute('data-slap-contact-frames');
+        this.resultFrames = [];
+        this.motionDiagnosticCanvas?.removeAttribute('data-slap-result-frames');
+    }
+
+    private captureResultFrame(): void {
+        if (!this.motionDiagnosticCanvas || !this.session || this.hidden || this.resultFrames.length >= 3) return;
+        const stage = this.resultVisualMs >= 900 ? 'settled' : this.resultVisualMs >= 450 ? 'settling' : 'start';
+        if (this.resultFrames.some(frame => frame.stage === stage)) return;
+        const canvas = this.motionDiagnosticCanvas as HTMLCanvasElement;
+        const frame: typeof this.resultFrames[number] = { stage, state: this.session.snapshot(), visualElapsedMs: this.resultVisualMs,
+            cast: this.skinEvidence(), width: canvas.width, height: canvas.height };
+        try { frame.image = canvas.toDataURL('image/jpeg', .88); }
+        catch (error) { frame.error = error instanceof Error ? error.message : 'Canvas result readback failed'; }
+        this.resultFrames.push(frame);
+        canvas.setAttribute('data-slap-result-frames', JSON.stringify({ build: BUILD_ID, mode: this.mode, practice: this.practice,
+            source: 'Cocos Director.EVENT_AFTER_DRAW canvas.toDataURL', frames: this.resultFrames }));
     }
 
     private publishFrameDiagnostics(wallMs: number): void {
@@ -283,7 +303,7 @@ export class SlapGame extends Component {
     }
 
     private sampleActors(state: BattleState): void {
-        const samples = this.motion.sample(state);
+        const samples = this.motion.sample(state, state.nowMs, this.resultVisualMs);
         this.pendingPoses = samples.map(sample => sample.pose) as [FighterPose, FighterPose];
         this.characterView.sample(samples);
     }
@@ -294,11 +314,11 @@ export class SlapGame extends Component {
         const state = this.pendingSkinState, poses = this.pendingPoses;
         if (!state || !poses || this.characterView.count !== 2) return;
         this.characterView.correct(state);
-        if (this.motionDiagnosticCanvas && this.page === 'battle') {
-            this.motionSamples.push({ nowMs: state.nowMs, poses, actual: this.characterView.measurements() });
+        if (this.motionDiagnosticCanvas && (this.page === 'battle' || this.page === 'result')) {
+            this.motionSamples.push({ nowMs: state.nowMs, visualElapsedMs: this.resultVisualMs, poses, actual: this.characterView.measurements() });
             if (this.motionSamples.length > 120) this.motionSamples.shift();
             this.motionDiagnosticCanvas.setAttribute('data-slap-motion', JSON.stringify({ build: BUILD_ID, page: this.page, mode: this.mode, practice: this.practice,
-                state, events: this.trace, samples: this.motionSamples, cast: this.skinEvidence() }));
+                state, visualElapsedMs: this.resultVisualMs, events: this.trace, samples: this.motionSamples, cast: this.skinEvidence() }));
         }
     }
 
@@ -407,7 +427,7 @@ export class SlapGame extends Component {
         this.attackLabel = this.guardLabel = this.statusLabel = this.resultLabel = this.timerLabel = null;
         this.hpLabels = []; this.hpBars = []; this.chargeBar = null;
         if (this.page === 'battle') { this.battleUI(); return; }
-        this.panel(0, 0, this.width, this.height, C.bg);
+        if (this.page !== 'result') this.panel(0, 0, this.width, this.height, C.bg);
         const top = this.landscape ? 260 : 500;
         if (this.page === 'menu') {
             this.text('掌上对决', 0, top, 660, 56);
@@ -461,12 +481,16 @@ export class SlapGame extends Component {
                 this.page === 'confirm' ? 'danger' : 'normal');
         } else if (this.page === 'result') {
             const result = this.session?.snapshot().result;
-            this.text(result === 'player' ? '你赢了' : result === 'bot' ? '这局输了' : '平局', 0, 200, 640, 56, C.gold);
+            const headingY = this.height / 2 - (this.landscape ? 64 : 100);
+            const footerY = -this.height / 2 + (this.landscape ? 72 : 232);
+            this.panel(0, headingY - 48, this.width, this.landscape ? 176 : 208, C.bg);
+            this.panel(0, footerY - 48, this.width, this.landscape ? 176 : 304, C.bg);
+            this.text(result === 'player' ? '你赢了' : result === 'bot' ? '这局输了' : '平局', 0, headingY, 640, this.landscape ? 40 : 56, C.gold);
             const state = this.session!.snapshot();
-            this.text(`剩余生命  ${state.fighters[0].hp} : ${state.fighters[1].hp}`, 0, 100, 640, 32);
-            this.text(this.mode === 'charge' ? '本局：蓄力出掌' : '本局：点击出掌', 0, 20, 640, 24);
-            this.button(this.practice === 'normal' ? '再来一局' : '重试练习', 0, -100, 520, () => this.begin(this.practice), true);
-            this.button('换种操作', 0, -220, 520, () => this.backToMenu());
+            this.text(`剩余生命  ${state.fighters[0].hp} : ${state.fighters[1].hp}`, 0, headingY - 64, 640, 32);
+            if (!this.landscape) this.text(this.mode === 'charge' ? '本局：蓄力出掌' : '本局：点击出掌', 0, headingY - 116, 640, 24);
+            this.button(this.practice === 'normal' ? '再来一局' : '重试练习', this.landscape ? -290 : 0, footerY, this.landscape ? 420 : 520, () => this.begin(this.practice), true);
+            this.button('换个人设', this.landscape ? 290 : 0, this.landscape ? footerY : footerY - 120, this.landscape ? 420 : 520, () => this.backToMenu());
         }
         const buildLabel = BUILD_ID.split('-').slice(0, 3).join('-');
         const buildText = this.landscape ? `构建 ${buildLabel} · 规则 ${DEFAULT_RULES.version}` : `构建 ${buildLabel}\n规则 ${DEFAULT_RULES.version}`;
@@ -510,6 +534,10 @@ export class SlapGame extends Component {
         if (this.page === 'loading') return;
         this.bridge.cancelAll();
         this.session?.pause(); this.session = null;
+        this.clearActors(); this.motion.reset(); this.seenEvents.clear(); this.trace = [];
+        this.motionSamples = []; this.clearContactFrames();
+        this.motionDiagnosticCanvas?.removeAttribute('data-slap-motion');
+        this.resultVisualMs = 0; this.skipVisualFrame = false;
         this.practice = practice;
         const token = ++this.loadGeneration;
         this.changePage('loading');
@@ -526,6 +554,7 @@ export class SlapGame extends Component {
                 if (!this.isValid || token !== this.loadGeneration) return;
                 this.session = new LocalSession({ sessionId: `local-${++this.round}`, mode: this.mode, practice, seed: 104729 });
                 this.clockMs = 0; this.sequence = 0;
+                this.resultVisualMs = 0; this.skipVisualFrame = false;
                 this.motion.reset(this.session.snapshot().sessionId);
                 this.motionSamples = [];
                 this.clearContactFrames();
@@ -577,13 +606,14 @@ export class SlapGame extends Component {
         ++this.loadGeneration;
         this.bridge.cancelAll(); this.session?.pause(); this.session = null;
         this.clearActors();
+        this.resultVisualMs = 0; this.skipVisualFrame = false;
         this.seenEvents.clear(); this.trace = []; this.changePage('menu');
         this.motion.reset();
         this.motionSamples = []; this.motionDiagnosticCanvas?.removeAttribute('data-slap-motion');
         this.clearContactFrames();
     }
-    private hide(): void { this.hidden = true; this.pause(); }
-    private show(): void { this.hidden = false; /* Only Continue resumes an active match. */ }
+    private hide(): void { this.hidden = true; this.skipVisualFrame = true; this.pause(); }
+    private show(): void { this.hidden = false; this.skipVisualFrame = true; /* Only Continue resumes an active match. */ }
 
     update(dt: number): void {
         // Observe actual Component updates even on menus/paused screens. These
@@ -598,6 +628,16 @@ export class SlapGame extends Component {
         this.frameMaxDtMs = this.frameMaxDtMs === null ? dtMs : Math.max(this.frameMaxDtMs, dtMs);
         this.frameRecentDtMs.push(dtMs);
         if (this.frameRecentDtMs.length > 120) this.frameRecentDtMs.shift();
+        if (this.ready && this.session && this.page === 'result') {
+            if (!this.hidden) {
+                if (this.skipVisualFrame) this.skipVisualFrame = false;
+                else this.resultVisualMs = Math.min(900, this.resultVisualMs + Math.max(0, dtMs));
+                const state = this.session.snapshot();
+                this.pendingSkinState = state; this.sampleActors(state);
+            }
+            this.publishFrameDiagnostics(wallMs);
+            return;
+        }
         if (!this.ready || !this.session || this.page !== 'battle' || this.session.paused) {
             this.publishFrameDiagnostics(wallMs);
             return;
@@ -607,7 +647,7 @@ export class SlapGame extends Component {
         this.consume(this.session.drainEvents());
         const state = this.session.snapshot();
         this.drawState(state);
-        if (state.result !== null) { this.bridge.cancelAll(); this.changePage('result'); }
+        if (state.result !== null) { this.bridge.cancelAll(); this.resultVisualMs = 0; this.skipVisualFrame = true; this.changePage('result'); }
         this.publishFrameDiagnostics(wallMs);
     }
 

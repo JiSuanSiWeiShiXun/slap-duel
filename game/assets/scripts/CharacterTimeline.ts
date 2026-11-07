@@ -61,6 +61,8 @@ export interface CharacterSample {
   normalizedTime: number;
   lunge: number;
   pose: FighterPose;
+  outcome: 'victory' | 'defeat' | 'draw' | null;
+  resultProgress: number;
 }
 
 /** Pure, read-only actor presentation boundary. */
@@ -114,7 +116,8 @@ export class CharacterTimeline {
         semanticClip = state.result === 'draw' ? 'idle' : (state.result === 'player') === (side === 0) ? 'victory' : 'defeat';
         normalizedTime = state.result === 'draw' ? 0 : resultElapsedMs / 900; lunge = 0;
       }
-      return { semanticClip, normalizedTime: clamp(normalizedTime), lunge, pose: poses[side] };
+      const outcome = state.result === null ? null : state.result === 'draw' ? 'draw' : semanticClip as 'victory' | 'defeat';
+      return { semanticClip, normalizedTime: clamp(normalizedTime), lunge, pose: poses[side], outcome, resultProgress: state.result === null ? 0 : clamp(resultElapsedMs / 900) };
     }) as [CharacterSample, CharacterSample];
   }
 }

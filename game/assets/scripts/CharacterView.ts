@@ -16,6 +16,8 @@ interface Actor {
   root: Node; animation: SkeletalAnimation; bones: Record<string,Node>; renderers: SkinnedMeshRenderer[];
   manifest: CastManifest; side: 0|1; states: Map<string,AnimationState>; clip: string;
   palm: Record<HandId,Vec3>; cheek: Vec3; contacts: Partial<Record<HandId,ArmSolution & {actualError: number}>>;
+  outcome: CharacterSample['outcome']; resultProgress: number;
+  resultStart: { root: Vec3; bones: Record<string,{position: Vec3; rotation: Quat}> } | null;
 }
 const point = (v: Readonly<Vec3>): Point => [v.x,v.y,v.z];
 
@@ -42,7 +44,7 @@ export class CharacterView {
         if (!animation || !renderers.length || renderers.some(r=>!r.mesh||!r.skeleton||r.skeleton.joints.length!==29)) { root.destroy(); throw new Error('Character has no valid29-joint skin'); }
         // Configure BEFORE first activation/onLoad creates animation states.
         animation.useBakedAnimation=false; root.active=true;
-        const actor: Actor={root,animation,renderers,manifest,side,bones:{},states:new Map(),clip:'',palm:{lead:new Vec3(),rear:new Vec3()},cheek:new Vec3(),contacts:{}};
+        const actor: Actor={root,animation,renderers,manifest,side,bones:{},states:new Map(),clip:'',palm:{lead:new Vec3(),rear:new Vec3()},cheek:new Vec3(),contacts:{},outcome:null,resultProgress:0,resultStart:null};
         this.actors.push(actor);
         for (const [name,path] of Object.entries(manifest.generated.imports.bonePaths)) {
           const bone=root.getChildByPath(path); if(!bone) throw new Error(`Character bone missing: ${name}`); actor.bones[name]=bone;
@@ -65,9 +67,18 @@ export class CharacterView {
     for (const a of this.actors) {
       const sample=samples[a.side], state=a.states.get(sample.semanticClip);
       if(!state) throw new Error(`Required combat clip not loaded: ${sample.semanticClip}`);
+      if (sample.outcome && !a.resultStart) {
+        // Capture the last rendered deform pose, including IK, before sampling the result clip.
+        const bones: NonNullable<Actor['resultStart']>['bones']={};
+        for(const [name,bone] of Object.entries(a.bones)) bones[name]={position:bone.position.clone(),rotation:bone.rotation.clone()};
+        a.resultStart={root:a.root.position.clone(),bones};
+      }
+      a.outcome=sample.outcome; a.resultProgress=sample.resultProgress;
       if(a.clip!==sample.semanticClip) { a.animation.stop(); a.animation.play(sample.semanticClip); state.pause(); a.clip=sample.semanticClip; }
       state.setTime(sample.normalizedTime*state.duration); state.sample();
-      a.root.setPosition((a.side===0?-.55:.55)+(a.side===0?1:-1)*sample.lunge,0,0);
+      const rootTarget=new Vec3((a.side===0?-.55:.55)+(a.side===0?1:-1)*sample.lunge,0,0);
+      const t=sample.resultProgress, blend=t*t*(3-2*t);
+      a.root.setPosition(a.resultStart?Vec3.lerp(new Vec3(),a.resultStart.root,rootTarget,blend):rootTarget);
     }
     this.newSample=true;
   }
@@ -75,6 +86,22 @@ export class CharacterView {
     const side=hand==='lead'?(a.side===0?'L':'R'):(a.side===0?'R':'L'); return a.bones[`Hand.${side}`];
   }
   private readPalm(a: Actor,hand: HandId): void { Vec3.transformMat4(a.palm[hand],new Vec3(0,.00095,0),this.handBone(a,hand).worldMatrix); }
+
+  private settleResult(a: Actor): void {
+    if(!a.resultStart) return;
+    const t=a.resultProgress, blend=t*t*(3-2*t);
+    for(const [name,bone] of Object.entries(a.bones)) {
+      const start=a.resultStart.bones[name], target=bone.rotation.clone();
+      // Draw has no winner: both relax their arms and give a small, readable neutral bow.
+      if(a.outcome==='draw') {
+        const angle=name==='Head'?14:name==='Chest'?6:0;
+        if(angle) Quat.multiply(target,target,Quat.fromEuler(new Quat(),angle,0,0));
+        if(name==='Forearm.L'||name==='Forearm.R') Quat.multiply(target,target,Quat.fromEuler(new Quat(),0,0,name.endsWith('.L')?-18:18));
+      }
+      bone.setPosition(Vec3.lerp(new Vec3(),start.position,bone.position,blend));
+      bone.setRotation(Quat.slerp(new Quat(),start.rotation,target,blend));
+    }
+  }
 
   private solveArm(a: Actor, hand: HandId, palm: Point): void {
     const side=hand==='lead'?(a.side===0?'L':'R'):(a.side===0?'R':'L');
@@ -103,6 +130,7 @@ export class CharacterView {
       const chest=this.actors[1].bones.Chest,q=chest.rotation; chest.setRotation(new Quat(q.x,-q.y,-q.z,q.w));
       this.newSample=false;
     }
+    if(state.result) for(const a of this.actors) this.settleResult(a);
     for(const a of this.actors) {
       Vec3.transformMat4(a.cheek,new Vec3((a.side===0?1:-1)*.0018,.0022,.0016),a.bones.Head.worldMatrix);
       this.readPalm(a,'lead'); this.readPalm(a,'rear'); a.contacts={};
@@ -119,6 +147,7 @@ export class CharacterView {
       prefabUuid:a.manifest.generated.imports.prefabUuid,skeletonUuid:a.manifest.generated.imports.skeletonUuid,
       skinnedRenderers:a.renderers.length,joints:Object.keys(a.bones).length,clip:a.clip,useBakedAnimation:a.animation.useBakedAnimation,
       sampledTime:a.states.get(a.clip)?.time??null,motionProfile:a.manifest.source.motionProfile,identityMaterial:1,contacts:a.contacts,
+      outcome:a.outcome,resultProgress:a.resultProgress,resultTransitionCaptured:a.resultStart!==null,
       actual:{...this.measurements()[a.side],pelvis:point(a.bones.Pelvis.worldPosition),root:point(a.root.worldPosition)}}));
   }
 }

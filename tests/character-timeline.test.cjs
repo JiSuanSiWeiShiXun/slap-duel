@@ -73,6 +73,7 @@ test('result uses actual winner and a separate elapsed time, including timeout w
     const first = t.sample(state, state.nowMs, 0), half = t.sample(state, state.nowMs, 450), last = t.sample(state, state.nowMs, 900);
     assert.deepEqual(first.map(f => f.semanticClip), result === 'draw' ? ['idle','idle'] : result === 'player' ? ['victory','defeat'] : ['defeat','victory']);
     assert.deepEqual(first.map(f => f.normalizedTime), [0,0]); assert.deepEqual(last.map(f => f.normalizedTime), result === 'draw' ? [0,0] : [1,1]);
+    assert.deepEqual(half.map(f=>f.resultProgress),[.5,.5]); assert.ok(first.every(f=>f.outcome!==null));
     assert.deepEqual(t.sample(state, state.nowMs, 450), half); assert.equal(state.nowMs, 60000);
   }
 });
