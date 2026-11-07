@@ -101,3 +101,47 @@ test('pause cancellation is reliable after the per-round command budget is exhau
   s.resume(); s.advanceTo(2000);
   assert.equal(s.snapshot().fighters[1].hp, 5);
 });
+
+test('both control modes preserve a confirmed counter across pause with exactly80ms remaining', () => {
+  for (const mode of ['tap', 'charge']) {
+    const s = new LocalSession(opts(mode, 'parry'));
+    s.submit(cmd(1630, 1, 'guard')); s.advanceTo(1680);
+    assert.deepEqual(s.snapshot().fighters.map(f => f.hp), [5, 5]);
+    assert.deepEqual(s.drainEvents().filter(e => e.kind === 'parry').map(e => [e.atMs, e.damage]), [[1680, 0]]);
+    s.advanceTo(1780); s.pause(); const frozen = s.snapshot();
+    s.advanceTo(50000); assert.deepEqual(s.snapshot(), frozen);
+    s.submit(cmd(1780, 2, mode === 'tap' ? 'attack' : 'charge-start'));
+    s.resume(); s.advanceTo(1859); assert.deepEqual(s.snapshot().fighters.map(f => f.hp), [5, 5]);
+    s.advanceTo(1860); assert.deepEqual(s.snapshot().fighters.map(f => f.hp), [5, 4]);
+    const events = s.drainEvents();
+    assert.deepEqual(events.filter(e => e.kind === 'counter-hit').map(e => [e.atMs, e.actorId, e.targetId, e.damage]), [[1860, 0, 1, 1]]);
+    assert.equal(events.filter(e => e.actorId === 0 && e.kind === 'attack-start').length, 0);
+    s.advanceTo(2120); assert.equal(s.snapshot().fighters[0].phase, 'idle');
+  }
+});
+
+test('restart before counter contact discards old automatic chain and old identity', () => {
+  const s = new LocalSession(opts('tap', 'parry'));
+  s.submit(cmd(1630, 1, 'guard')); s.advanceTo(1780);
+  s.restart(opts('tap', 'hit', 'next-counter'));
+  s.submit(cmd(1800, 2, 'attack', 'local')); s.advanceTo(3000);
+  assert.deepEqual(s.snapshot().fighters.map(f => f.hp), [5, 5]);
+  assert.deepEqual(s.drainEvents(), []);
+});
+
+test('normal bot shares legal counter rules in both modes and is frame invariant', () => {
+  for (const mode of ['tap', 'charge']) {
+    function run(step) {
+      const s = new LocalSession(opts(mode, 'normal'));
+      // Normal Bot starts at1000; a public guard at1430 catches its1480 contact.
+      s.submit(cmd(1430, 1, 'guard'));
+      s.submit(cmd(1500, 2, mode === 'tap' ? 'attack' : 'charge-start'));
+      let t = 0; while (t < 2000) { t = Math.min(2000, t + step); s.advanceTo(t); }
+      return { state: s.snapshot(), events: s.drainEvents() };
+    }
+    const a = run(1); assert.deepEqual(run(37), a);
+    assert.equal(a.events.filter(e => e.kind === 'counter-hit').length, 1);
+    assert.ok(a.events.some(e => e.kind === 'rejected' && e.atMs === 1500 && e.reason === 'counter'));
+    assert.equal(a.state.fighters[1].hp, 4);
+  }
+});
