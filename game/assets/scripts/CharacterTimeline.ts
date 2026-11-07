@@ -1,5 +1,12 @@
 import { ActorId, BattleEvent, BattleState, DEFAULT_RULES } from './core/Battle';
-import { ParryMotion, FighterPose } from './ParryMotion';
+import { ParryMotion, FighterPose, Point } from './ParryMotion';
+
+export interface ArmSolution {
+  elbow: Point; wrist: Point; reachable: boolean; requestedDistance: number; solvedDistance: number; error: number;
+}
+export function solveTwoBone(shoulder: Point, upperLength: number, foreLength: number, palm: Point, palmOffset: number): ArmSolution {
+  return { elbow: [...shoulder], wrist: [...shoulder], reachable: false, requestedDistance: 0, solvedDistance: 0, error: 1 };
+}
 
 export interface CharacterSample {
   semanticClip: string;

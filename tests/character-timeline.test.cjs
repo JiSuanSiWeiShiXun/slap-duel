@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { CharacterTimeline } = require('../.test-build/CharacterTimeline.js');
+const { CharacterTimeline, solveTwoBone } = require('../.test-build/CharacterTimeline.js');
 const { Battle, DEFAULT_RULES } = require('../.test-build/core/Battle.js');
 const freeze = v => { Object.freeze(v); for (const child of Object.values(v)) if (child && typeof child === 'object') freeze(child); return v; };
 const command = (sessionId, actorId, atMs, action, sequence = 1) => ({ sessionId, actorId, atMs, action, sequence });
@@ -75,4 +75,33 @@ test('result uses actual winner and a separate elapsed time, including timeout w
     assert.deepEqual(first.map(f => f.normalizedTime), [0,0]); assert.deepEqual(last.map(f => f.normalizedTime), result === 'draw' ? [0,0] : [1,1]);
     assert.deepEqual(t.sample(state, state.nowMs, 450), half); assert.equal(state.nowMs, 60000);
   }
+});
+
+// Actual imported glTF/bin FK, counter-recovery0 / idle0, both roots positive scale.
+// Source identity is checked against manifests; geometry additionally has independent length constraints.
+const rig = {
+  manager: { a: .4600002, b: .4399999, shoulder: [-.4617916,1.505,.2380404], cheek: [.3142368,1.8808716,.0796795], arm: 1, height: 1 },
+  veteran: { a: .4508001, b: .4312003, shoulder: [-.4220492,1.5071848,.2153441], cheek: [.3013447,1.8791122,.1073269], arm: .98, height: 1 },
+  rookie: { a: .4927522, b: .4713282, shoulder: [-.4117178,1.5582249,.2408116], cheek: [.2934130,1.9410441,.1243366], arm: 1.03, height: 1.04 },
+};
+const distance = (a,b) => Math.hypot(...a.map((v,i) => v-b[i]));
+test('actual imported9 ordered role pairs x2 stations keep fixed bones and reach the opposite cheek', () => {
+  for (const [role,a] of Object.entries(rig)) for (const [target,b] of Object.entries(rig)) for (const side of [0,1]) {
+    const sign = side === 0 ? 1 : -1;
+    const shoulder = a.shoulder.map((v,i) => i === 0 ? v*sign : v), palm = b.cheek.map((v,i) => i === 0 ? v*sign : v);
+    const solved = solveTwoBone(shoulder, a.a, a.b, palm, .095);
+    assert.equal(solved.reachable, true, `${role}->${target} side${side}`);
+    assert.ok(Math.abs(distance(shoulder,solved.elbow)-a.a) < 1e-6);
+    assert.ok(Math.abs(distance(solved.elbow,solved.wrist)-a.b) < 1e-6);
+    assert.ok(distance([solved.wrist[0],solved.wrist[1]+.095,solved.wrist[2]],palm)<1e-6);
+    assert.ok(solved.requestedDistance < a.a+a.b && solved.requestedDistance > Math.abs(a.a-a.b));
+    assert.ok([...solved.elbow,...solved.wrist,solved.error].every(Number.isFinite));
+  }
+});
+test('two-bone solver reports unreachable targets and rejects invalid geometry', () => {
+  const s = solveTwoBone([0,0,0],.46,.44,[3,2,0],.095);
+  assert.equal(s.reachable,false); assert.ok(s.error>1); assert.ok(s.solvedDistance<.9);
+  const zero = solveTwoBone([0,0,0],.46,.44,[0,.095,0],.095);
+  assert.equal(zero.reachable,false); assert.ok([...zero.elbow,...zero.wrist].every(Number.isFinite));
+  assert.throws(()=>solveTwoBone([NaN,0,0],.46,.44,[0,1,0],.095),/finite/);
 });
