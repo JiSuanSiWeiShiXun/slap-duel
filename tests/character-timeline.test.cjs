@@ -162,3 +162,28 @@ test('same batch can retain two independent damage-qualified attacks without cha
   assert.deepEqual(t.sample(state).map(s=>s.semanticClip),['attack-heavy','attack-light']);
   t.consume(state,events); assert.deepEqual(t.sample(state).map(s=>s.semanticClip),['attack-heavy','attack-light']);
 });
+test('first48ms of counter recovery retain a drawable real-palm contact without extending260ms recovery', () => {
+  for(const side of [0,1]) {
+    const {t,frames}=counterFrames(side), hit=frames[4].state;
+    const anchors=[0,1].map(i=>({root:[i===0?-.21:.21,0,0],cheek:[i===0?-.3:.3,1.88,.1],leadPalm:[0,1.4,.1],rearPalm:[0,1.1,.1]}));
+    for(const age of [0,14,29,48]) {
+      const state={...hit,nowMs:660+age};
+      assert.equal(t.sample(state)[side].normalizedTime,0);
+      assert.equal(t.sample(state)[side].lunge,.34);
+      assert.deepEqual(characterContacts(state,anchors)[side].rear,anchors[1-side].cheek);
+    }
+    const end={...hit,nowMs:920}; assert.equal(t.sample(end)[side].normalizedTime,1); assert.equal(t.sample(end)[side].lunge,0);
+    assert.equal(DEFAULT_RULES.counterWindupMs,180); assert.equal(DEFAULT_RULES.counterRecoveryMs,260);
+  }
+});
+test('counter-hit arriving before parry across batches cannot keep an expired chain at440ms', () => {
+  for(const defender of [0,1]) {
+    const {frames}=counterFrames(defender), state=frames.at(-1).state, events=frames.flatMap(f=>f.events);
+    const ordered=new CharacterTimeline(), lateParry=new CharacterTimeline();
+    ordered.consume(state,events);
+    lateParry.consume(state,events.filter(e=>e.kind!=='parry'));
+    lateParry.consume(state,events.filter(e=>e.kind==='parry'));
+    assert.deepEqual(lateParry.sample(state),ordered.sample(state));
+    assert.deepEqual(lateParry.sample(state),new CharacterTimeline().sample(state),'440ms is the completed-chain boundary');
+  }
+});

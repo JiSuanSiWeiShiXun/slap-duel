@@ -58,8 +58,9 @@ export class ParryMotion {
   private sessionId: string | null = null;
   private seen = new Set<string>();
   private chains: Chain[] = [];
+  private pendingHits = new Map<string, number>();
 
-  reset(sessionId: string | null = null): void { this.sessionId = sessionId; this.seen.clear(); this.chains = []; }
+  reset(sessionId: string | null = null): void { this.sessionId = sessionId; this.seen.clear(); this.chains = []; this.pendingHits.clear(); }
 
   consume(state: Readonly<BattleState>, events: readonly BattleEvent[], rules: Readonly<Rules> = DEFAULT_RULES): void {
     if (state.sessionId !== this.sessionId) this.reset(state.sessionId);
@@ -67,17 +68,20 @@ export class ParryMotion {
     for (const event of [...events].sort((a, b) => a.atMs - b.atMs)) {
       if (event.sessionId !== this.sessionId || this.seen.has(event.id)) continue;
       this.seen.add(event.id);
-      if (event.kind === 'ended') { this.chains = []; continue; }
+      if (event.kind === 'ended') { this.chains = []; this.pendingHits.clear(); continue; }
       if (event.actorId === undefined || event.targetId === undefined) continue;
       if (event.kind === 'parry') {
-        this.chains.push({ atMs: event.atMs, actor: event.actorId, target: event.targetId, hitAtMs: null });
+        const key = `${event.actorId}:${event.targetId}:${event.atMs}`;
+        this.chains.push({ atMs: event.atMs, actor: event.actorId, target: event.targetId, hitAtMs: this.pendingHits.get(key) ?? null });
       } else if (event.kind === 'counter-hit') {
+        this.pendingHits.set(`${event.actorId}:${event.targetId}:${event.atMs - rules.counterWindupMs}`, event.atMs);
         const chain = this.chains.find(c => c.actor === event.actorId && c.target === event.targetId && c.atMs + rules.counterWindupMs === event.atMs);
         if (chain) chain.hitAtMs = event.atMs;
       }
     }
-    if (state.result) this.chains = [];
+    if (state.result) { this.chains = []; this.pendingHits.clear(); }
     else this.chains = this.chains.filter(c => state.nowMs <= c.atMs + rules.counterWindupMs + Math.max(rules.counterRecoveryMs, rules.stunMs));
+    for (const [key, atMs] of this.pendingHits) if (state.nowMs >= atMs + Math.max(rules.counterRecoveryMs, rules.stunMs)) this.pendingHits.delete(key);
   }
 
   sample(state: Readonly<BattleState>, nowMs: number = state.nowMs, anchors: ArenaAnchors = DEFAULT_ANCHORS, rules: Readonly<Rules> = DEFAULT_RULES): [FighterPose, FighterPose] {
@@ -86,7 +90,7 @@ export class ParryMotion {
       if (!anchor.root.every(Number.isFinite) || !anchor.cheek.every(Number.isFinite) || (anchor.facing !== 1 && anchor.facing !== -1)) throw new Error('Invalid motion anchors');
     }
     const chainFor = (actor: number) => state.sessionId === this.sessionId && !state.result
-      ? this.chains.find(c => c.actor === actor && c.atMs <= nowMs && nowMs <= c.atMs + rules.counterWindupMs + rules.counterRecoveryMs) : undefined;
+      ? this.chains.find(c => c.actor === actor && c.atMs <= nowMs && nowMs < c.atMs + rules.counterWindupMs + rules.counterRecoveryMs) : undefined;
     const clipKeys = state.fighters.map((f, i) => {
       if (state.result) return sampleClip(PARRY_CLIPS.guard, 0);
       const chain = chainFor(i);

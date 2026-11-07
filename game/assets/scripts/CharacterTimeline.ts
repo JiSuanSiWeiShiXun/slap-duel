@@ -26,6 +26,8 @@ export function solveTwoBone(shoulder: Point, upperLength: number, foreLength: n
 
 export interface ContactAnchors { root: Point; cheek: Point; leadPalm: Point; rearPalm: Point; }
 export interface ContactTargets { lead: Point | null; rear: Point | null; }
+// Rule-time visual hold makes the actual contact drawable even when a frame lands just after the hit.
+export const COUNTER_CONTACT_HOLD_MS = 48;
 /** Targets use actual post-apply bone anchors; no socket or animation duration is a rule clock. */
 export function characterContacts(state: Readonly<BattleState>, anchors: readonly [ContactAnchors, ContactAnchors]): [ContactTargets, ContactTargets] {
   if (anchors.some(a=>[...a.root,...a.cheek,...a.leadPalm,...a.rearPalm].some(v=>!Number.isFinite(v)))) throw new Error('Contact anchors must be finite');
@@ -49,7 +51,7 @@ export function characterContacts(state: Readonly<BattleState>, anchors: readonl
     if (f.phase==='windup') lead=lerp([(i===0?-.55:.55)+facing*.25,1.55,.15],state.fighters[1-i].phase==='guard'?guarded[1-i]:other.cheek,(age/DEFAULT_RULES.windupMs-.65)/.35);
     if (f.phase==='recovery') lead=lerp(other.cheek,rest,age/DEFAULT_RULES.recoveryMs);
     if (f.phase==='counter') rear=lerp([own.root[0]-facing*.35,1.65,.18],other.cheek,(age/DEFAULT_RULES.counterWindupMs-.32)/.68);
-    if (f.phase==='counter-recovery') rear=lerp(other.cheek,[(i===0?-.55:.55)-facing*.35,1.1,.25],age/DEFAULT_RULES.counterRecoveryMs);
+    if (f.phase==='counter-recovery') rear=lerp(other.cheek,[(i===0?-.55:.55)-facing*.35,1.1,.25],(age-COUNTER_CONTACT_HOLD_MS)/(DEFAULT_RULES.counterRecoveryMs-COUNTER_CONTACT_HOLD_MS));
     return {lead,rear};
   }) as [ContactTargets,ContactTargets];
 }
@@ -105,7 +107,7 @@ export class CharacterTimeline {
         normalizedTime = age / DEFAULT_RULES.windupMs;
       } else if (f.phase === 'guard' || f.phase === 'parried') { semanticClip = 'guard'; normalizedTime = age / 60; }
       else if (f.phase === 'counter') { semanticClip = 'counter'; normalizedTime = age / DEFAULT_RULES.counterWindupMs; lunge = .34 * clamp(normalizedTime); }
-      else if (f.phase === 'counter-recovery') { semanticClip = 'counter-recovery'; normalizedTime = age / DEFAULT_RULES.counterRecoveryMs; lunge = .34 * (1 - clamp(normalizedTime)); }
+      else if (f.phase === 'counter-recovery') { semanticClip = 'counter-recovery'; normalizedTime = (age - COUNTER_CONTACT_HOLD_MS) / (DEFAULT_RULES.counterRecoveryMs - COUNTER_CONTACT_HOLD_MS); lunge = .34 * (1 - clamp(normalizedTime)); }
       else if (f.phase === 'recovery') { semanticClip = 'recovery'; normalizedTime = age / DEFAULT_RULES.recoveryMs; }
       else if (f.phase === 'stunned') { semanticClip = 'hit'; normalizedTime = age / DEFAULT_RULES.stunMs; }
       if (state.result !== null) {
