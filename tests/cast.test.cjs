@@ -2,7 +2,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const { ROLE_IDS, castResource, createCastCatalog, makeRoundSetup, projectIntro } = require('../.test-build/Cast.js');
+const { ROLE_IDS, castResource, createCastCatalog, makeRoundSetup, projectIntro, RoundGate } = require('../.test-build/Cast.js');
+const { LocalSession } = require('../.test-build/session/LocalSession.js');
 const raw = () => ['manager', 'veteran', 'rookie'].map(role => JSON.parse(fs.readFileSync(`game/assets/resources/office-cast/${role}/manifest.json`, 'utf8')));
 const catalog = () => createCastCatalog(raw());
 const selection = (playerRoleId = 'manager', opponentRoleId = 'veteran', mode = 'tap') => ({ playerRoleId, opponentRoleId, mode });
@@ -137,4 +138,70 @@ test('invalid viewer and unsupported attack mode fail without silently changing 
   projectIntro(setup, 1);
   assert.equal(JSON.stringify(setup), before);
   assert.equal(setup.actors[0].actorId, 0);
+});
+
+test('round gate locks one start until clear and rejects copied or cancelled generation tickets', () => {
+  const gate = new RoundGate(), cast = catalog();
+  const setup = makeRoundSetup(cast, selection()), another = makeRoundSetup(cast, selection('rookie', 'rookie'));
+  assert.equal(gate.retry(), null);
+  const first = gate.start(setup);
+  assert.ok(first);
+  assert.ok(Object.isFrozen(first));
+  assert.equal(first.setup, setup);
+  assert.equal(gate.isCurrent(first), true);
+  assert.equal(gate.isCurrent({ ...first }), false);
+  assert.equal(gate.start(setup), null);
+  assert.equal(gate.start(another), null);
+  gate.clear();
+  assert.equal(gate.isCurrent(first), false);
+  const next = gate.start(another);
+  assert.ok(next.generation > first.generation);
+  assert.equal(next.setup, another);
+  assert.equal(gate.isCurrent(next), true);
+});
+
+test('late loading success or failure cannot replace a newer selection or recover a cleared round', async () => {
+  const gate = new RoundGate(), cast = catalog();
+  const old = gate.start(makeRoundSetup(cast, selection('manager', 'veteran')));
+  let finish, fail;
+  const deferredSuccess = new Promise(resolve => { finish = resolve; });
+  const deferredFailure = new Promise((resolve, reject) => { fail = reject; });
+  const applied = [], errors = [];
+  const success = deferredSuccess.then(value => { if (gate.isCurrent(old)) applied.push(value); });
+  const failure = deferredFailure.catch(error => { if (gate.isCurrent(old)) errors.push(error); });
+  gate.clear();
+  const current = gate.start(makeRoundSetup(cast, selection('rookie', 'manager', 'charge')));
+  finish('stale manager skin'); fail(new Error('stale resource failure'));
+  await Promise.all([success, failure]);
+  assert.deepEqual(applied, []); assert.deepEqual(errors, []);
+  assert.equal(gate.isCurrent(current), true);
+  assert.equal(current.setup.actors[0].roleId, 'rookie');
+  gate.clear();
+  assert.equal(gate.isCurrent(current), false);
+});
+
+test('retry retains both roles, revision and mode while replacing ticket and clearing session events', () => {
+  const gate = new RoundGate(), setup = makeRoundSetup(catalog(), selection('rookie', 'manager', 'charge'));
+  const first = gate.start(setup), old = new LocalSession({ sessionId: `cast-${first.generation}`, mode: setup.mode, practice: 'hit', seed: 42 });
+  old.submit({ sessionId: `cast-${first.generation}`, actorId: 0, atMs: 0, sequence: 1, action: 'charge-start' });
+  old.submit({ sessionId: `cast-${first.generation}`, actorId: 0, atMs: 1200, sequence: 2, action: 'charge-release' });
+  old.advanceTo(1680);
+  assert.equal(old.snapshot().fighters[1].hp, 3);
+  const retry = gate.retry();
+  assert.notEqual(retry, first);
+  assert.ok(retry.generation > first.generation);
+  assert.equal(retry.setup, first.setup);
+  assert.equal(gate.isCurrent(first), false);
+  assert.equal(gate.isCurrent(retry), true);
+  assert.equal(gate.start(makeRoundSetup(catalog(), selection('veteran', 'rookie'))), null);
+  const session = new LocalSession({ sessionId: `cast-${retry.generation}`, mode: retry.setup.mode, practice: 'hit', seed: 42 });
+  session.submit({ sessionId: `cast-${first.generation}`, actorId: 0, atMs: 0, sequence: 1, action: 'charge-release' });
+  session.advanceTo(2000);
+  assert.deepEqual(session.snapshot().fighters.map(fighter => fighter.hp), [5, 5]);
+  assert.deepEqual(session.drainEvents(), []);
+  assert.equal(retry.setup.actors[0].roleId, 'rookie');
+  assert.equal(retry.setup.actors[1].roleId, 'manager');
+  assert.equal(retry.setup.mode, 'charge');
+  assert.ok(Object.isFrozen(retry.setup.actors[0].facets));
+  assert.equal(projectIntro(retry.setup, 1)[0].text, setup.actors[0].facets.negative);
 });
