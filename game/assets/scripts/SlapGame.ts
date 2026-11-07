@@ -10,7 +10,8 @@ import { LocalSession } from './session/LocalSession';
 import { InputBridge } from './InputBridge';
 import { latestContact, contactText } from './Feedback';
 import { BUILD_ID } from './BuildInfo';
-import { ParryMotion, FighterPose, ArmPose, Point, DEFAULT_ANCHORS } from './ParryMotion';
+import { FighterPose, Point } from './ParryMotion';
+import { CharacterTimeline } from './CharacterTimeline';
 
 const { ccclass } = _decorator;
 type Page = 'menu' | 'practice' | 'loading' | 'battle' | 'paused' | 'confirm' | 'result' | 'error';
@@ -80,7 +81,7 @@ export class SlapGame extends Component {
     private materials: Material[] = [];
     private meshes: Mesh[] = [];
     private seenEvents = new Set<string>();
-    private motion = new ParryMotion();
+    private motion = new CharacterTimeline();
     private feedback = '';
     private feedbackUntil = 0;
     private feedbackColor = C.ink;
@@ -326,24 +327,15 @@ export class SlapGame extends Component {
 
     private sampleActors(state: BattleState): void {
         this.newSkinSample = true;
+        const samples = this.motion.sample(state);
+        this.pendingPoses = samples.map(sample => sample.pose) as [FighterPose, FighterPose];
         for (const actor of this.actors) {
-            const f = state.fighters[actor.side], age = state.nowMs - f.phaseStartMs;
-            let name = 'idle', progress = (state.nowMs % 2000) / 2000;
-            if (f.phase === 'charging') { name = 'charge'; progress = (age % 1200) / 1200; }
-            else if (f.phase === 'windup') { name = this.trace.some(e => e.kind === 'attack-start' && e.actorId === actor.side && e.atMs === f.phaseStartMs && (e.damage ?? 1) > 1) ? 'attack-heavy' : 'attack-light'; progress = age / DEFAULT_RULES.windupMs; }
-            else if (f.phase === 'guard' || f.phase === 'parried') { name = 'guard'; progress = Math.min(1, age / 60); }
-            else if (f.phase === 'counter') { name = 'counter'; progress = age / DEFAULT_RULES.counterWindupMs; }
-            else if (f.phase === 'counter-recovery') { name = 'counter-recovery'; progress = age / DEFAULT_RULES.counterRecoveryMs; }
-            else if (f.phase === 'recovery') { name = 'recovery'; progress = age / DEFAULT_RULES.recoveryMs; }
-            else if (f.phase === 'stunned') { name = 'hit'; progress = age / DEFAULT_RULES.stunMs; }
-            if (state.result !== null) { name = f.hp > 0 ? 'victory' : 'defeat'; progress = 1; }
+            const { semanticClip: name, normalizedTime: progress, lunge } = samples[actor.side];
             const animationState = actor.states.get(name);
             if (!animationState) throw new Error(`Required combat clip not loaded: ${name}`);
             if (actor.clip !== name) { actor.animation.stop(); actor.animation.play(name); animationState.pause(); actor.clip = name; }
             animationState.setTime(clamp(progress) * animationState.duration); animationState.sample();
             const facing = actor.side === 0 ? 1 : -1;
-            const lunge = f.phase === 'counter' ? .34 * clamp(age / DEFAULT_RULES.counterWindupMs)
-                : f.phase === 'counter-recovery' ? .34 * (1 - clamp(age / DEFAULT_RULES.counterRecoveryMs)) : 0;
             actor.root.setPosition((actor.side === 0 ? -.55 : .55) + facing * lunge, 0, 0);
         }
     }
@@ -770,11 +762,7 @@ export class SlapGame extends Component {
             this.guardAvailable = guardAvailable;
             this.paintControl(this.guardPanel!, guardAvailable ? C.panel : '#1D2C35');
         }
-        const poses = this.motion.sample(state, state.nowMs, [
-            { root: [-.55, 0, 0], facing: 1, cheek: [.18, 1.9, .16] },
-            { root: [.55, 0, 0], facing: -1, cheek: [-.18, 1.9, .16] },
-        ]);
-        this.pendingSkinState = state; this.pendingPoses = poses;
+        this.pendingSkinState = state;
         this.sampleActors(state);
         for (let i = 0; i < 2; i++) {
             const fighter = state.fighters[i];

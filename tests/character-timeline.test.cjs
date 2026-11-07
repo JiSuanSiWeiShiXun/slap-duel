@@ -30,6 +30,8 @@ test('attack-start damage survives the short UI trace and is session scoped', ()
   t.consume(state, [...events, ...Array.from({ length: 40 }, (_, i) => ({ id: 'noise'+i, sessionId: 'heavy', kind: 'rejected', atMs: 1230 }))]);
   assert.equal(t.sample(state)[0].semanticClip, 'attack-heavy');
   t.consume(state, [...events].reverse()); assert.equal(t.sample(state)[0].semanticClip, 'attack-heavy');
+  t.consume(state, [{ id: 'unseen-old', sessionId: 'heavy', atMs: 0, kind: 'attack-start', actorId: 0, damage: 1 }]);
+  assert.equal(t.sample(state)[0].semanticClip, 'attack-heavy', 'cross-batch old attack cannot overwrite the current palm');
   const next = { ...state, sessionId: 'next' }; t.consume(next, events);
   assert.equal(t.sample(next)[0].semanticClip, 'attack-light');
 });
@@ -37,6 +39,13 @@ test('charge reaches full at1200 and stays there until cancelled', () => {
   const b = new Battle('charge', 'charge'), t = new CharacterTimeline(); b.submit(command('charge', 0, 0, 'charge-start'));
   for (const now of [0, 600, 1200, 2401]) { b.advanceTo(now); const s = b.snapshot(); t.consume(s, b.drainEvents()); assert.equal(t.sample(s)[0].normalizedTime, Math.min(now / 1200, 1)); }
   b.submit(command('charge', 0, 2401, 'charge-cancel', 2)); b.advanceTo(2401); t.consume(b.snapshot(), b.drainEvents()); assert.equal(t.sample(b.snapshot())[0].semanticClip, 'idle');
+});
+test('future transport events are retryable at their rule time', () => {
+  const s = new Battle('future', 'tap').snapshot(), t = new CharacterTimeline();
+  const event = { id: 'future-heavy', sessionId: 'future', atMs: 100, kind: 'attack-start', actorId: 0, damage: 2 };
+  t.consume(s, [event]);
+  const later = { ...s, nowMs: 101, fighters: [{ ...s.fighters[0], phase: 'windup', phaseStartMs: 100 }, s.fighters[1]] };
+  t.consume(later, [event]); assert.equal(t.sample(later)[0].semanticClip, 'attack-heavy');
 });
 test('parry catches before hit and counter contact remains exactly180ms on either side', () => {
   for (const side of [0,1]) {
