@@ -79,6 +79,16 @@ test('result buttons and build marker reserve separate rows in all orientations'
   }
 });
 
+test('landscape intro gives full-width three-line stories their own row below portraits', () => {
+  const layout = fromScreen(844, 390);
+  for (const [i, story] of layout.intro.stories.entries()) {
+    assert.ok(story.width >= 32 * 11);
+    assert.equal(story.height, 32 * 1.5 * 3);
+    assert.ok(disjoint(story, layout.intro.portraits[i]));
+    assert.ok(story.y - story.height / 2 >= layout.intro.cards[i].y - layout.intro.cards[i].height / 2);
+  }
+});
+
 test('orientation round trip produces identical rectangles without retaining prior layout state', () => {
   const portrait = fromScreen(360, 640), before = JSON.stringify(portrait.menu);
   fromScreen(844, 390);

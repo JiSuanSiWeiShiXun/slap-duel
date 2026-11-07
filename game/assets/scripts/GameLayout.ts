@@ -81,10 +81,10 @@ export function layoutFromUiSafeRect(design: DesignSize, safeRect: LayoutRect, c
     const intro = Object.freeze({
         title: box(0, landscape ? 300 : 520, 680, 80),
         cards: frozenRects(cardX.map((x, i) => box(x, cardY[i], landscape ? 568 : 664, landscape ? 380 : 300))),
-        portraits: frozenRects(cardX.map((x, i) => box(x - (landscape ? 170 : 222), cardY[i] - 12, landscape ? 180 : 176, landscape ? 180 : 176))),
+        portraits: frozenRects(cardX.map((x, i) => box(x - (landscape ? 170 : 222), cardY[i] + (landscape ? 52 : -12), landscape ? 144 : 176, landscape ? 144 : 176))),
         facets: frozenRects(cardX.map((x, i) => box(x, cardY[i] + (landscape ? 145 : 112), 540, 50))),
         names: frozenRects(cardX.map((x, i) => box(x + (landscape ? 88 : 84), cardY[i] + (landscape ? 65 : 45), landscape ? 326 : 430, 56))),
-        stories: frozenRects(cardX.map((x, i) => box(x + (landscape ? 88 : 84), cardY[i] - (landscape ? 75 : 55), landscape ? 308 : 420, landscape ? 200 : 150))),
+        stories: frozenRects(cardX.map((x, i) => box(x + (landscape ? 0 : 84), cardY[i] - (landscape ? 110 : 55), landscape ? 520 : 420, landscape ? 144 : 150))),
         enter: target(landscape ? 170 : 0, landscape ? -245 : -400, 520, 96),
         back: target(landscape ? -430 : 0, landscape ? -245 : -510, landscape ? 300 : 520, 96),
     });
