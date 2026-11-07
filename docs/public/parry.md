@@ -41,3 +41,5 @@
 Cocos 的 `SlapGame.consume` 先将全部 `fresh` 交给 `ParryMotion`，之后才用 `latestContact` 选择单条文字。正式 `CharacterView` 应保留这一顺序；只消费一条提示事件会丢失低帧批次中的动作。文字按较新时间优先，同刻顺序为 `counter-hit > parry > block > hit`；parry 显示挡住/准备反击，counter-hit 才显示事件的实际伤害。
 
 `tests/parry-motion.test.cjs` 加载 tsconfig.rules.json 编译的真实模块，覆盖双手职责、双方接触、时间边界、整批事件、去重、恢复、暂停同时间和新局/终局清理。`npm test` 验规则和模块；`node tools/check-game.mjs --typecheck` 验已安装引擎声明；`tools/build-game.ps1` 分别构建 Web 与微信。构建和坐标测试不能替代真实连续画面、手机输入或用户对正式视觉的采用。
+
+Web 的显式 `?diagnosticMotion=1` 将有限的只读规则/姿势/实际节点采样写到 canvas 的 `data-slap-motion`。同一开关才注册 `Director.EVENT_AFTER_DRAW`，每局最多捕获抬手、接掌、起身反掌、命中四张真实 canvas JPEG，并将规则时间、HP、阶段、相关事件及图像写到独立的 `data-slap-contact-frames`。新局清缓存，销毁时注销；默认运行不注册捕获、不编码图像。读取失败会保留错误，实际图片仍须查看，黑图不能作为动作证据；诊断运行不替代默认模式体验。

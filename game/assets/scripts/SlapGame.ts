@@ -1,7 +1,7 @@
 import {
     _decorator, Component, Node, Camera, Canvas, UITransform, Layers, Color, Vec3,
     MeshRenderer, Material, Mesh, primitives, utils, Label, Graphics, Quat,
-    input, Input, EventTouch, game, Game, view, screen, ResolutionPolicy, sys, DirectionalLight, profiler,
+    input, Input, EventTouch, game, Game, view, screen, ResolutionPolicy, sys, DirectionalLight, profiler, director, Director,
 } from 'cc';
 import { ActionKind, AttackMode, BattleState, BattleEvent, DEFAULT_RULES } from './core/Battle';
 import { LocalSession } from './session/LocalSession';
@@ -16,6 +16,11 @@ type Practice = 'normal' | 'hit' | 'block' | 'parry';
 type Button = { transform: UITransform; label: Label; action: () => void };
 type Arm = { shoulder: Node; elbow: Node; wrist: Node; upper: Node; forearm: Node; palm: Node };
 type Figure = { root: Node; body: Node; head: Node; cheek: Node; arms: { lead: Arm; rear: Arm } };
+type ContactFrame = {
+    stage: 'guard-raise' | 'parry-catch' | 'counter-rise' | 'counter-hit'; actorId: number;
+    nowMs: number; hp: number[]; phases: string[]; events: BattleEvent[];
+    width: number; height: number; image?: string; error?: string;
+};
 const C = { bg: '#16232C', panel: '#293C48', ink: '#F5F4EF', gold: '#FFD166', blue: '#73C5D5', orange: '#E6A17A', danger: '#F47C7C' };
 const clamp = (n: number) => Math.max(0, Math.min(1, n));
 
@@ -72,6 +77,8 @@ export class SlapGame extends Component {
     private frameDiagnosticCanvas: HTMLElement | null = null;
     private motionDiagnosticCanvas: HTMLElement | null = null;
     private motionSamples: { nowMs: number; poses: [FighterPose, FighterPose]; actual: { leadPalm: Point; rearPalm: Point; cheek: Point; head: Point }[] }[] = [];
+    private motionFrameState: BattleState | null = null;
+    private contactFrames: ContactFrame[] = [];
     private framePublishedWallMs = -Infinity;
     private diagnosticStart: 'slow' | 'fail-once' | null = null;
     private diagnosticStartFailed = false;
@@ -98,6 +105,7 @@ export class SlapGame extends Component {
         game.on(Game.EVENT_SHOW, this.show, this);
         view.on('canvas-resize', this.resize, this);
         this.ready = true;
+        if (this.motionDiagnosticCanvas) director.on(Director.EVENT_AFTER_DRAW, this.captureContactFrame, this);
         // Read-only diagnostics help tie runtime evidence to this exact build.
         (globalThis as unknown as Record<string, unknown>).__SLAP_DEBUG__ = {
             build: BUILD_ID,
@@ -113,6 +121,41 @@ export class SlapGame extends Component {
             wallNowMs: performance.now(), totalDtMs: this.frameTotalDtMs,
             minDtMs: this.frameMinDtMs, maxDtMs: this.frameMaxDtMs,
             recentDtMs: this.frameRecentDtMs.slice(), hidden: this.hidden };
+    }
+
+    /** Capture the engine's actual canvas after drawing, only with the explicit diagnostic query. */
+    private captureContactFrame(): void {
+        if (!this.motionDiagnosticCanvas || this.page !== 'battle' || this.contactFrames.length >= 4 || !this.motionFrameState) return;
+        const state = this.motionFrameState;
+        let stage: ContactFrame['stage'] | null = null, actorId = -1;
+        for (let i = 0; i < 2; i++) {
+            const f = state.fighters[i], age = state.nowMs - f.phaseStartMs;
+            if (f.phase === 'counter-recovery') { stage = 'counter-hit'; actorId = i; break; }
+            if (f.phase === 'counter') {
+                stage = age >= DEFAULT_RULES.counterWindupMs * 0.65 ? 'counter-rise' : 'parry-catch'; actorId = i; break;
+            }
+            if (f.phase === 'guard' && age > 0 && stage === null) { stage = 'guard-raise'; actorId = i; }
+        }
+        if (stage === null || this.contactFrames.some(frame => frame.stage === stage)) return;
+        const canvas = this.motionDiagnosticCanvas as HTMLCanvasElement;
+        const frame: ContactFrame = { stage, actorId, nowMs: state.nowMs,
+            hp: state.fighters.map(f => f.hp), phases: state.fighters.map(f => f.phase),
+            events: this.trace.filter(e => e.kind === 'parry' || e.kind === 'counter-hit' || e.kind === 'attack-start').map(e => ({ ...e })),
+            width: canvas.width, height: canvas.height };
+        try {
+            const data = canvas.toDataURL('image/jpeg', 0.88);
+            if (!data.startsWith('data:image/jpeg;base64,') || data.length < 64) throw new Error('Canvas readback returned no JPEG');
+            frame.image = data;
+        } catch (error) { frame.error = error instanceof Error ? error.message : 'Canvas readback failed'; }
+        this.contactFrames.push(frame);
+        // Encode at most four times per session. The images never feed back into gameplay.
+        canvas.setAttribute('data-slap-contact-frames', JSON.stringify({ build: BUILD_ID, sessionId: state.sessionId,
+            mode: this.mode, practice: this.practice, source: 'Cocos Director.EVENT_AFTER_DRAW canvas.toDataURL', frames: this.contactFrames }));
+    }
+
+    private clearContactFrames(): void {
+        this.motionFrameState = null; this.contactFrames = [];
+        this.motionDiagnosticCanvas?.removeAttribute('data-slap-contact-frames');
     }
 
     private publishFrameDiagnostics(wallMs: number): void {
@@ -427,6 +470,7 @@ export class SlapGame extends Component {
                 this.clockMs = 0; this.sequence = 0;
                 this.motion.reset(this.session.snapshot().sessionId);
                 this.motionSamples = [];
+                this.clearContactFrames();
                 this.seenEvents.clear(); this.trace = []; this.feedback = ''; this.feedbackUntil = 0;
                 if (this.hidden) { this.session.pause(); this.changePage('paused'); }
                 else this.changePage('battle');
@@ -476,6 +520,7 @@ export class SlapGame extends Component {
         this.seenEvents.clear(); this.trace = []; this.changePage('menu');
         this.motion.reset();
         this.motionSamples = []; this.motionDiagnosticCanvas?.removeAttribute('data-slap-motion');
+        this.clearContactFrames();
     }
     private hide(): void { this.hidden = true; this.pause(); }
     private show(): void { this.hidden = false; /* Only Continue resumes an active match. */ }
@@ -575,6 +620,7 @@ export class SlapGame extends Component {
         this.resultLabel!.string = state.nowMs < this.feedbackUntil ? this.feedback : '';
         this.resultLabel!.color = new Color(this.feedbackColor);
         this.timerLabel!.string = `${Math.ceil((DEFAULT_RULES.roundDurationMs - state.nowMs) / 1000)} 秒`;
+        if (this.motionDiagnosticCanvas) this.motionFrameState = state;
     }
 
     private paintControl(panel: Graphics, color: string): void {
@@ -587,6 +633,8 @@ export class SlapGame extends Component {
     onDestroy(): void {
         this.frameDiagnosticCanvas?.removeAttribute('data-slap-diagnostics');
         this.motionDiagnosticCanvas?.removeAttribute('data-slap-motion');
+        if (this.motionDiagnosticCanvas) director.off(Director.EVENT_AFTER_DRAW, this.captureContactFrame, this);
+        this.clearContactFrames();
         input.off(Input.EventType.TOUCH_START, this.touchStart, this);
         input.off(Input.EventType.TOUCH_END, this.touchEnd, this);
         input.off(Input.EventType.TOUCH_CANCEL, this.touchCancel, this);
