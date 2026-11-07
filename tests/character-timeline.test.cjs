@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { CharacterTimeline, solveTwoBone } = require('../.test-build/CharacterTimeline.js');
+const { CharacterTimeline, solveTwoBone, characterContacts } = require('../.test-build/CharacterTimeline.js');
 const { Battle, DEFAULT_RULES } = require('../.test-build/core/Battle.js');
 const freeze = v => { Object.freeze(v); for (const child of Object.values(v)) if (child && typeof child === 'object') freeze(child); return v; };
 const command = (sessionId, actorId, atMs, action, sequence = 1) => ({ sessionId, actorId, atMs, action, sequence });
@@ -84,7 +84,24 @@ const rig = {
   veteran: { a: .4508001, b: .4312003, shoulder: [-.4220492,1.5071848,.2153441], cheek: [.3013447,1.8791122,.1073269], arm: .98, height: 1 },
   rookie: { a: .4927522, b: .4713282, shoulder: [-.4117178,1.5582249,.2408116], cheek: [.2934130,1.9410441,.1243366], arm: 1.03, height: 1.04 },
 };
+const guardShoulders = { manager:[-.2359644,1.47,-.1464372], veteran:[-.2661378,1.4689625,-.1174429], rookie:[-.2611350,1.5279314,-.1032784] };
+const capturedSourceHashes = {
+  manager: 'ff49ef76912e0a3c4f807fc96aecf2ac1fe0389344e7a46b922cf3b2f7689b5c',
+  veteran: 'a45a72b8037f85fd3008ef692c2acbd3dd9067354136e9ab6e1ce12bb2275359',
+  rookie: 'a4eab106bfec150cc87c92666241b98467505a3de1246d72bc76ee69d32fea1b',
+};
 const distance = (a,b) => Math.hypot(...a.map((v,i) => v-b[i]));
+test('geometry fixture retains actual source provenance and independently matches imported bone proportions', () => {
+  const fs = require('node:fs'), path = require('node:path');
+  for (const [role, data] of Object.entries(rig)) {
+    const manifest = JSON.parse(fs.readFileSync(path.join(__dirname,'../game/assets/resources/office-cast',role,'manifest.json'),'utf8'));
+    assert.equal(manifest.generated.sourceHash,capturedSourceHashes[role]);
+    assert.ok(Math.abs(data.a-.46*manifest.source.proportions.arm*manifest.source.proportions.height)<1e-6);
+    assert.ok(Math.abs(data.b-.44*manifest.source.proportions.arm*manifest.source.proportions.height)<1e-6);
+    assert.notEqual(manifest.source.guardHand,manifest.source.counterHand);
+    assert.ok(manifest.generated.imports.bonePaths['UpperArm.L'] && manifest.generated.imports.bonePaths['Hand.R']);
+  }
+});
 test('actual imported9 ordered role pairs x2 stations keep fixed bones and reach the opposite cheek', () => {
   for (const [role,a] of Object.entries(rig)) for (const [target,b] of Object.entries(rig)) for (const side of [0,1]) {
     const sign = side === 0 ? 1 : -1;
@@ -104,4 +121,44 @@ test('two-bone solver reports unreachable targets and rejects invalid geometry',
   const zero = solveTwoBone([0,0,0],.46,.44,[0,.095,0],.095);
   assert.equal(zero.reachable,false); assert.ok([...zero.elbow,...zero.wrist].every(Number.isFinite));
   assert.throws(()=>solveTwoBone([NaN,0,0],.46,.44,[0,1,0],.095),/finite/);
+});
+test('actual guard and incoming parried palm remain reachable for9x2 imported shapes', () => {
+  for (const [role,a] of Object.entries(rig)) for (const [target,b] of Object.entries(rig)) for (const side of [0,1]) {
+    const sign=side===0?1:-1, mirror=p=>p.map((v,i)=>i===0?v*sign:v);
+    const shoulder=mirror(guardShoulders[role]);
+    const ownCheek=mirror(a.cheek.map((v,i)=>i===0?-v:v));
+    const ownGuard=[ownCheek[0]+sign*.10,ownCheek[1]-.025,ownCheek[2]+.07];
+    assert.equal(solveTwoBone(shoulder,a.a,a.b,ownGuard,.095).reachable,true);
+    const otherShoulder=mirror(guardShoulders[target].map((v,i)=>i===0?-v:v));
+    assert.equal(solveTwoBone(otherShoulder,b.a,b.b,ownGuard,.095).reachable,true,`${target} incoming to${role} guard side${side}`);
+  }
+});
+test('non-striking hand stays explicitly parked and charge uses the same lead hand at both stations', () => {
+  const state=new Battle('hands','charge').snapshot(), anchors=[0,1].map(i=>({root:[i===0?-.55:.55,0,0],cheek:[i===0?-.3:.3,1.88,.1],leadPalm:[0,1.4,.1],rearPalm:[0,1.1,.1]}));
+  for(const phase of ['charging','windup','recovery','guard','parried']) {
+    state.fighters=state.fighters.map(f=>({...f,phase})); const targets=characterContacts(state,anchors);
+    assert.ok(targets.every(t=>t.lead&&t.rear)); assert.ok(targets[0].rear[0]<-.55&&targets[1].rear[0]>.55);
+  }
+});
+test('all role pairs and both stations catch one palm, then use the other at0/179/180/440 boundaries', () => {
+  for (const a of Object.values(rig)) for (const b of Object.values(rig)) for (const defender of [0,1]) {
+    const { frames } = counterFrames(defender);
+    const actors = defender===0?[a,b]:[b,a];
+    const anchors = actors.map((r,i)=>({root:[i===0?-.55:.55,0,0],cheek:r.cheek.map((v,k)=>k===0&&i===0?-v:v),leadPalm:[0,1.4,.1],rearPalm:[0,1.1,.1]}));
+    const caught = characterContacts(frames[2].state,anchors);
+    assert.deepEqual(caught[defender].lead,caught[1-defender].lead);
+    const before=characterContacts(frames[3].state,anchors), contact=characterContacts(frames[4].state,anchors);
+    assert.ok(distance(before[defender].rear,anchors[1-defender].cheek)>0);
+    assert.deepEqual(contact[defender].rear,anchors[1-defender].cheek);
+    assert.deepEqual(characterContacts(frames[4].state,anchors),contact,'paused same time has no contact drift');
+    assert.deepEqual(characterContacts(frames[6].state,anchors),[{lead:null,rear:null},{lead:null,rear:null}]);
+  }
+});
+test('same batch can retain two independent damage-qualified attacks without changing rules', () => {
+  const state=new Battle('both','tap').snapshot(); state.nowMs=100;
+  state.fighters=state.fighters.map(f=>({...f,phase:'windup',phaseStartMs:100}));
+  const events=[0,1].map(i=>({id:'attack'+i,sessionId:'both',atMs:100,kind:'attack-start',actorId:i,damage:i===0?2:1}));
+  const t=new CharacterTimeline(); t.consume(state,[...events].reverse());
+  assert.deepEqual(t.sample(state).map(s=>s.semanticClip),['attack-heavy','attack-light']);
+  t.consume(state,events); assert.deepEqual(t.sample(state).map(s=>s.semanticClip),['attack-heavy','attack-light']);
 });

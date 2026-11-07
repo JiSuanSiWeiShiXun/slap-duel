@@ -1,9 +1,8 @@
 import {
     _decorator, Component, Node, Camera, Canvas, UITransform, Layers, Color, Vec3,
-    MeshRenderer, Material, Mesh, primitives, utils, Label, Graphics, Quat,
+    MeshRenderer, Material, Mesh, primitives, utils, Label, Graphics,
     input, Input, EventTouch, game, Game, view, screen, ResolutionPolicy, sys, DirectionalLight, profiler, director, Director,
-    resources, JsonAsset, Prefab, instantiate, assetManager, Asset, SkeletalAnimation, SkinnedMeshRenderer,
-    AnimationState, Sprite, SpriteFrame, Texture2D,
+    resources, JsonAsset, Prefab, assetManager, Asset, Sprite, SpriteFrame, Texture2D,
 } from 'cc';
 import { ActionKind, AttackMode, BattleState, BattleEvent, DEFAULT_RULES } from './core/Battle';
 import { LocalSession } from './session/LocalSession';
@@ -12,19 +11,12 @@ import { latestContact, contactText } from './Feedback';
 import { BUILD_ID } from './BuildInfo';
 import { FighterPose, Point } from './ParryMotion';
 import { CharacterTimeline } from './CharacterTimeline';
+import { CharacterView, CastManifest, RoleId } from './CharacterView';
 
 const { ccclass } = _decorator;
 type Page = 'menu' | 'practice' | 'loading' | 'battle' | 'paused' | 'confirm' | 'result' | 'error';
 type Practice = 'normal' | 'hit' | 'block' | 'parry';
 type Button = { transform: UITransform; label: Label; action: () => void };
-type RoleId = 'manager' | 'veteran' | 'rookie';
-type CastManifest = { schemaVersion: number; source: { roleId: RoleId; displayName: string;
-    facets: { positive: string; negative: string }; appearance: { cloth: string; outfit: string }; proportions: { height: number; arm: number } };
-    generated: { sourceHash: string; imports: { prefabUuid: string; skeletonUuid: string; portraitTextureUuid: string;
-        bonePaths: Record<string, string>; clipUuids: Record<string, string> } } };
-type SkinnedActor = { root: Node; animation: SkeletalAnimation; bones: Record<string, Node>;
-    renderers: SkinnedMeshRenderer[]; manifest: CastManifest; side: 0 | 1;
-    states: Map<string, AnimationState>; clip: string; palm: { lead: Vec3; rear: Vec3 }; cheek: Vec3 };
 type ContactFrame = {
     stage: 'guard-raise' | 'parry-catch' | 'counter-dip' | 'counter-rise' | 'counter-hit'; actorId: number;
     nowMs: number; hp: number[]; phases: string[]; events: BattleEvent[];
@@ -65,7 +57,7 @@ export class SlapGame extends Component {
     private chargeBar: Graphics | null = null;
     private resultLabel: Label | null = null;
     private timerLabel: Label | null = null;
-    private actors: SkinnedActor[] = [];
+    private characterView = new CharacterView();
     private cast: CastManifest[] = [];
     private selectedRole: RoleId = 'manager';
     private opponentRole: RoleId = 'manager';
@@ -77,7 +69,6 @@ export class SlapGame extends Component {
     private catalogGeneration = 0;
     private pendingSkinState: BattleState | null = null;
     private pendingPoses: [FighterPose, FighterPose] | null = null;
-    private newSkinSample = false;
     private materials: Material[] = [];
     private meshes: Mesh[] = [];
     private seenEvents = new Set<string>();
@@ -279,141 +270,32 @@ export class SlapGame extends Component {
     }
 
     private clearActors(): void {
-        this.pendingSkinState = null; this.pendingPoses = null;
-        for (const actor of this.actors) { actor.root.active = false; actor.animation.stop(); actor.root.destroy(); }
-        this.actors = [];
+        this.pendingSkinState = null; this.pendingPoses = null; this.characterView.clear();
     }
 
     private async prepareActors(token: number): Promise<void> {
-        const selected = [this.selectedRole, this.opponentRole];
-        const manifests = selected.map(role => this.cast.find(m => m.source.roleId === role));
+        const manifests = [this.selectedRole, this.opponentRole].map(role => this.cast.find(m => m.source.roleId === role));
         if (manifests.some(m => !m)) throw new Error(this.castError || 'Character assets are still loading');
         const templates = await Promise.all(manifests.map(m => this.loadAsset<Prefab>(m!.generated.imports.prefabUuid)));
         if (!this.isValid || token !== this.loadGeneration) return;
         this.clearActors();
-        try {
-            for (const side of [0, 1] as const) {
-                const manifest = manifests[side]!, root = instantiate(templates[side]);
-                // Configure real-time skinning before onLoad creates any baked states.
-                root.active = false;
-                this.world.addChild(root); root.setPosition(side === 0 ? -.55 : .55, 0, 0);
-                root.setRotationFromEuler(0, side === 0 ? 25 : -25, 0);
-                const animation = root.getComponent(SkeletalAnimation) || root.getComponentInChildren(SkeletalAnimation);
-                const renderers = root.getComponentsInChildren(SkinnedMeshRenderer);
-                if (!animation || !renderers.length || renderers.some(r => !r.mesh || !r.skeleton || r.skeleton.joints.length !== 29)) { root.destroy(); throw new Error('Character has no valid 29-joint skin'); }
-                animation.useBakedAnimation = false;
-                root.active = true;
-                const bones: Record<string, Node> = {};
-                for (const [name, path] of Object.entries(manifest.generated.imports.bonePaths)) {
-                    const bone = root.getChildByPath(path); if (!bone) { root.destroy(); throw new Error(`Character bone missing: ${name}`); } bones[name] = bone;
-                }
-                const states = new Map<string, AnimationState>();
-                for (const name of Object.keys(manifest.generated.imports.clipUuids)) {
-                    const state = animation.getState(name);
-                    if (!state) { root.destroy(); throw new Error(`Character clip missing: ${name}`); }
-                    states.set(name, state);
-                }
-                if (!states.has('counter') || !states.has('idle')) { root.destroy(); throw new Error('Combat animation import incomplete'); }
-                for (const renderer of renderers) {
-                    renderer.node.layer = Layers.Enum.DEFAULT;
-                    const material = renderer.getMaterialInstance(manifest.source.appearance.outfit === 'shirt' ? 2 : 1);
-                    material?.setProperty('mainColor', new Color(side === 0 ? C.blue : C.orange));
-                }
-                this.actors.push({ root, animation, bones, renderers, manifest, side, states, clip: '',
-                    palm: { lead: new Vec3(), rear: new Vec3() }, cheek: new Vec3() });
-            }
-        } catch (error) { this.clearActors(); throw error; }
+        this.characterView.prepare(this.world, manifests as CastManifest[], templates);
     }
 
     private sampleActors(state: BattleState): void {
-        this.newSkinSample = true;
         const samples = this.motion.sample(state);
         this.pendingPoses = samples.map(sample => sample.pose) as [FighterPose, FighterPose];
-        for (const actor of this.actors) {
-            const { semanticClip: name, normalizedTime: progress, lunge } = samples[actor.side];
-            const animationState = actor.states.get(name);
-            if (!animationState) throw new Error(`Required combat clip not loaded: ${name}`);
-            if (actor.clip !== name) { actor.animation.stop(); actor.animation.play(name); animationState.pause(); actor.clip = name; }
-            animationState.setTime(clamp(progress) * animationState.duration); animationState.sample();
-            const facing = actor.side === 0 ? 1 : -1;
-            actor.root.setPosition((actor.side === 0 ? -.55 : .55) + facing * lunge, 0, 0);
-        }
+        this.characterView.sample(samples);
     }
 
-    private skinEvidence() {
-        const point = (v: Readonly<Vec3>) => [v.x, v.y, v.z];
-        return this.actors.map(actor => ({ roleId: actor.manifest.source.roleId, sourceHash: actor.manifest.generated.sourceHash,
-            prefabUuid: actor.manifest.generated.imports.prefabUuid, skeletonUuid: actor.manifest.generated.imports.skeletonUuid,
-            skinnedRenderers: actor.renderers.length, joints: Object.keys(actor.bones).length, clip: actor.clip,
-            useBakedAnimation: actor.animation.useBakedAnimation, sampledTime: actor.states.get(actor.clip)?.time ?? null,
-            actual: { leadPalm: point(actor.palm.lead), rearPalm: point(actor.palm.rear), cheek: point(actor.cheek),
-                head: point(actor.bones.Head.worldPosition), pelvis: point(actor.bones.Pelvis.worldPosition), root: point(actor.root.worldPosition) } }));
-    }
-
-    /** Solve on deform bones after animation blending; never changes rule state. */
-    private solveArm(actor: SkinnedActor, hand: 'lead' | 'rear', palmTarget: Vec3): void {
-        const side = hand === 'lead' ? actor.side === 0 ? 'L' : 'R' : actor.side === 0 ? 'R' : 'L';
-        const upper = actor.bones[`UpperArm.${side}`], fore = actor.bones[`Forearm.${side}`], wrist = actor.bones[`Hand.${side}`];
-        const shoulder = upper.worldPosition.clone(), forePoint = fore.worldPosition.clone(), wristPoint = wrist.worldPosition.clone();
-        const a = Vec3.distance(shoulder, forePoint), b = Vec3.distance(forePoint, wristPoint);
-        // Palm centre lies .095m beyond the wrist; open fingers point upwards.
-        const target = new Vec3(palmTarget.x, palmTarget.y - .095 * actor.manifest.source.proportions.height, palmTarget.z);
-        const direction = Vec3.subtract(new Vec3(), target, shoulder);
-        const distance = Math.max(.025, Math.min(direction.length(), a + b - .001)); direction.normalize();
-        const along = (a * a - b * b + distance * distance) / (2 * distance);
-        const bend = new Vec3(0, -1, -.15);
-        Vec3.subtract(bend, bend, Vec3.multiplyScalar(new Vec3(), direction, Vec3.dot(bend, direction))); bend.normalize();
-        const elbow = Vec3.add(new Vec3(), shoulder, Vec3.multiplyScalar(new Vec3(), direction, along));
-        Vec3.add(elbow, elbow, Vec3.multiplyScalar(new Vec3(), bend, Math.sqrt(Math.max(0, a * a - along * along))));
-        const endpoint = Vec3.add(new Vec3(), shoulder, Vec3.multiplyScalar(new Vec3(), direction, distance));
-        const orient = (bone: Node, end: Vec3) => {
-            const up = Vec3.subtract(new Vec3(), end, bone.worldPosition).normalize();
-            // Imported bind axes: local Y runs down the arm; local +/-X is the palm normal.
-            const normal = new Vec3(0, 0, side === 'L' ? 1 : -1);
-            const right = Vec3.subtract(new Vec3(), normal, Vec3.multiplyScalar(new Vec3(), up, Vec3.dot(normal, up))).normalize();
-            const front = Vec3.cross(new Vec3(), right, up).normalize();
-            bone.setWorldRotation(Quat.fromAxes(new Quat(), right, up, front));
-        };
-        orient(upper, elbow); orient(fore, endpoint);
-        // Keep a visible palm face towards the camera instead of flipping/negative scale.
-        wrist.setWorldRotation(Quat.fromAxes(new Quat(), new Vec3(0, 0, side === 'L' ? 1 : -1), Vec3.UP, new Vec3(side === 'L' ? -1 : 1, 0, 0)));
-        Vec3.transformMat4(actor.palm[hand], new Vec3(0, .00095, 0), wrist.worldMatrix);
-    }
+    private skinEvidence() { return this.characterView.evidence(); }
 
     lateUpdate(): void {
         const state = this.pendingSkinState, poses = this.pendingPoses;
-        if (!state || !poses || this.actors.length !== 2) return;
-        if (this.newSkinSample) {
-            // Reflect the source body's turn for the opposite station without negative scale.
-            const chest = this.actors[1].bones.Chest, q = chest.rotation;
-            chest.setRotation(new Quat(q.x, -q.y, -q.z, q.w));
-            this.newSkinSample = false;
-        }
-        for (const actor of this.actors) {
-            const facing = actor.side === 0 ? 1 : -1;
-            Vec3.transformMat4(actor.cheek, new Vec3(facing * .0018, .0022, .0016), actor.bones.Head.worldMatrix);
-        }
-        const guarded = this.actors.map(actor => new Vec3(actor.cheek.x + (actor.side === 0 ? .10 : -.10), actor.cheek.y - .025, actor.cheek.z + .07));
-        for (const actor of this.actors) {
-            const f = state.fighters[actor.side], other = this.actors[1 - actor.side], age = state.nowMs - f.phaseStartMs;
-            const lead = new Vec3(...poses[actor.side].arms.lead.palm), rear = new Vec3(...poses[actor.side].arms.rear.palm);
-            if (f.phase === 'guard' || f.phase === 'counter' || f.phase === 'counter-recovery') lead.set(guarded[actor.side]);
-            if (f.phase === 'parried') lead.set(guarded[1 - actor.side]);
-            if (f.phase === 'windup') {
-                const target = state.fighters[other.side].phase === 'guard' ? guarded[other.side] : other.cheek;
-                const u = clamp((age / DEFAULT_RULES.windupMs - .65) / .35);
-                Vec3.lerp(lead, new Vec3((actor.side === 0 ? -.55 : .55) + (actor.side === 0 ? .25 : -.25), 1.55, .15), target, u);
-            }
-            if (f.phase === 'counter') Vec3.lerp(rear, new Vec3(actor.root.worldPosition.x + (actor.side === 0 ? -.35 : .35), 1.65, .18), other.cheek, clamp((age / DEFAULT_RULES.counterWindupMs - .32) / .68));
-            if (f.phase === 'counter-recovery') Vec3.lerp(rear, other.cheek, new Vec3((actor.side === 0 ? -.55 : .55) + (actor.side === 0 ? -.35 : .35), 1.1, .25), clamp(age / DEFAULT_RULES.counterRecoveryMs));
-            if (f.phase === 'idle' || f.phase === 'charging' || f.phase === 'stunned' || state.result !== null) {
-                const handNames = actor.side === 0 ? ['L', 'R'] : ['R', 'L'];
-                for (const [index, hand] of (['lead', 'rear'] as const).entries()) Vec3.transformMat4(actor.palm[hand], new Vec3(0, .00095, 0), actor.bones[`Hand.${handNames[index]}`].worldMatrix);
-            } else { this.solveArm(actor, 'lead', lead); this.solveArm(actor, 'rear', rear); }
-        }
+        if (!state || !poses || this.characterView.count !== 2) return;
+        this.characterView.correct(state);
         if (this.motionDiagnosticCanvas && this.page === 'battle') {
-            const point = (v: Vec3): Point => [v.x, v.y, v.z];
-            this.motionSamples.push({ nowMs: state.nowMs, poses, actual: this.actors.map(a => ({ leadPalm: point(a.palm.lead), rearPalm: point(a.palm.rear), cheek: point(a.cheek), head: point(a.bones.Head.worldPosition) })) });
+            this.motionSamples.push({ nowMs: state.nowMs, poses, actual: this.characterView.measurements() });
             if (this.motionSamples.length > 120) this.motionSamples.shift();
             this.motionDiagnosticCanvas.setAttribute('data-slap-motion', JSON.stringify({ build: BUILD_ID, page: this.page, mode: this.mode, practice: this.practice,
                 state, events: this.trace, samples: this.motionSamples, cast: this.skinEvidence() }));
