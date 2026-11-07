@@ -14,17 +14,23 @@ import { CharacterTimeline } from './CharacterTimeline';
 import { CharacterView, CastManifest, RoleId } from './CharacterView';
 import { CastCatalog, RoundSetup, RoundTicket, RoundGate, ROLE_IDS, createCastCatalog, makeRoundSetup, projectIntro, castResource } from './Cast';
 import { ArenaView } from './ArenaView';
+import { LayoutRect, layoutFromUiSafeRect } from './GameLayout';
 
 const { ccclass } = _decorator;
 type Page = 'menu' | 'practice' | 'loading' | 'intro' | 'battle' | 'paused' | 'confirm' | 'result' | 'error';
 type Practice = 'normal' | 'hit' | 'block' | 'parry';
-type Button = { transform: UITransform; label: Label; action: () => void };
+type Button = { transform: UITransform; label: Label; name: string; action: () => void };
 type ContactFrame = {
     stage: 'guard-raise' | 'parry-catch' | 'counter-dip' | 'counter-rise' | 'counter-hit'; actorId: number;
     nowMs: number; hp: number[]; phases: string[]; events: BattleEvent[];
     width: number; height: number; image?: string; error?: string;
 };
 const C = { bg: '#16232C', panel: '#293C48', ink: '#F5F4EF', gold: '#FFD166', blue: '#73C5D5', orange: '#E6A17A', danger: '#F47C7C' };
+const POSITIVE_PREVIEW: Record<RoleId, string> = {
+    manager: '表达有条理，善于组织信息、清晰汇报。',
+    veteran: '经验丰富，评估全面，考虑周到。',
+    rookie: '有干劲，积极迎接新任务。',
+};
 const clamp = (n: number) => Math.max(0, Math.min(1, n));
 
 /** Presentation only: snapshots drive poses; semantic events drive feedback. */
@@ -45,6 +51,7 @@ export class SlapGame extends Component {
     private width = 720;
     private height = 1280;
     private landscape = false;
+    private layout = layoutFromUiSafeRect({ width: 720, height: 1280 }, { x: 0, y: 0, width: 720, height: 1280 }, { x: .5, y: .5 });
     private buttons: Button[] = [];
     private bridge = new InputBridge(action => this.submit(action));
     private attack: UITransform | null = null;
@@ -351,7 +358,8 @@ export class SlapGame extends Component {
 
     private resize(): void {
         if (!this.ui) return;
-        this.bridge.cancelAll();
+        // Reflow has no input meaning. Real TOUCH_CANCEL and lifecycle paths
+        // retain pointer cancellation; resizing alone must not submit a command.
         // Only the aspect ratio is used, so screen's physical pixels are DPR-independent here.
         const frame = screen.windowSize;
         this.landscape = frame.width > frame.height;
@@ -364,6 +372,11 @@ export class SlapGame extends Component {
         const horizontalFit = Math.max(1, (720 / 1280) / Math.max(0.01, aspect));
         this.worldCamera.fov = Math.atan(Math.tan(39 * Math.PI / 360) * horizontalFit) * 360 / Math.PI;
         view.setDesignResolutionSize(this.width, this.height, ResolutionPolicy.SHOW_ALL);
+        // In Creator3.8.8 sys already calls view._convertToUISpace. Its rect
+        // must be clipped in design space, never divided by scale a second time.
+        this.layout = layoutFromUiSafeRect({ width: this.width, height: this.height }, sys.getSafeAreaRect(false), {
+            x: view.getScaleX() / screen.devicePixelRatio, y: view.getScaleY() / screen.devicePixelRatio,
+        });
         this.ui.getComponent(UITransform)!.setContentSize(this.width, this.height);
         this.renderPage();
     }
@@ -417,9 +430,21 @@ export class SlapGame extends Component {
         }
         const darkText = style === 'danger' || (primary && style !== 'selected');
         const label = this.text(value, x, y, width - 16, 32, darkText ? C.bg : C.ink, height - 8);
-        const button = { transform: panel.node.getComponent(UITransform)!, label, action };
+        label.enableWrapText = false;
+        const button = { transform: panel.node.getComponent(UITransform)!, label, name: value, action };
         this.buttons.push(button);
         return button;
+    }
+
+    private labelAt(value: string, rect: LayoutRect, size = 32, color = C.ink): Label {
+        return this.text(value, rect.x, rect.y, rect.width, size, color, rect.height);
+    }
+    private panelAt(rect: LayoutRect, color = C.panel): Graphics {
+        return this.panel(rect.x, rect.y, rect.width, rect.height, color);
+    }
+    private buttonAt(value: string, rect: LayoutRect, action: () => void, primary = false,
+        style: 'normal' | 'selected' | 'danger' = 'normal'): Button {
+        return this.button(value, rect.x, rect.y, rect.width, action, primary, rect.height, style);
     }
 
     private changePage(page: Page): void { this.page = page; this.renderPage(); }
@@ -436,37 +461,33 @@ export class SlapGame extends Component {
     }
 
     private selectionUI(): void {
-        this.text('掌上对决', 0, this.landscape ? 300 : 540, 660, 56);
-        this.text('选择你的人设', 0, this.landscape ? 240 : 455, 640, 40);
-        const cardY = this.landscape ? 70 : 190;
+        const l = this.layout.menu;
+        this.labelAt('掌上对决', l.title, 56);
+        this.labelAt('选择你的人设', l.subtitle, 40);
         for (let i = 0; i < this.cast.length; i++) {
             const role = this.cast[i], id = role.source.roleId, selected = id === this.selectedRole;
-            const x = (i - 1) * (this.landscape ? 390 : 228), width = this.landscape ? 350 : 212;
-            this.button('', x, cardY, width, () => { this.selectedRole = id; this.renderPage(); }, false,
-                this.landscape ? 280 : 400, selected ? 'selected' : 'normal');
-            this.portrait(id, x, cardY + (this.landscape ? 52 : 68), this.landscape ? 144 : 176);
-            this.text(`${role.source.displayName}${selected ? ' · 已选' : ''}`, x, cardY - (this.landscape ? 34 : 48), width - 12, 24, selected ? C.gold : C.ink, 42);
-            this.text(role.source.facets.positive, x, cardY - (this.landscape ? 90 : 125), width - 24, 24, C.ink, this.landscape ? 100 : 124);
+            const card = this.buttonAt('', l.cards[i], () => { this.selectedRole = id; this.renderPage(); }, false, selected ? 'selected' : 'normal');
+            card.name = `选择${role.source.displayName}${selected ? ' · 已选' : ''}`;
+            const portrait = l.portraits[i]; this.portrait(id, portrait.x, portrait.y, Math.min(portrait.width, portrait.height));
+            this.labelAt(`${role.source.displayName}${selected ? ' · 已选' : ''}`, l.names[i], 24, selected ? C.gold : C.ink);
+            this.labelAt(POSITIVE_PREVIEW[id], l.summaries[i], 24);
         }
         if (!this.catalog) {
             this.text(this.castError ? '人设载入失败，请重试。' : '正在载入三个人设…', 0, 100, 640, 32);
             if (this.castError) this.button('重试载入', 0, -20, 440, () => this.loadCast(), true);
         }
-        const y = this.landscape ? -140 : -100;
-        this.button(`蓄力出掌${this.mode === 'charge' ? ' · 已选' : ''}`, -168, y, 312, () => { this.mode = 'charge'; this.renderPage(); }, false, 80, this.mode === 'charge' ? 'selected' : 'normal');
-        this.button(`点击出掌${this.mode === 'tap' ? ' · 已选' : ''}`, 168, y, 312, () => { this.mode = 'tap'; this.renderPage(); }, false, 80, this.mode === 'tap' ? 'selected' : 'normal');
-        if (!this.landscape) this.text('轻掌伤害1 · 按住1.2秒蓄满伤害2\n人物长处不改变攻防数值。', 0, -185, 640, 24, C.ink, 64);
+        this.buttonAt(`蓄力出掌${this.mode === 'charge' ? ' · 已选' : ''}`, l.modes[0], () => { this.mode = 'charge'; this.renderPage(); }, false, this.mode === 'charge' ? 'selected' : 'normal');
+        this.buttonAt(`点击出掌${this.mode === 'tap' ? ' · 已选' : ''}`, l.modes[1], () => { this.mode = 'tap'; this.renderPage(); }, false, this.mode === 'tap' ? 'selected' : 'normal');
+        if (!this.landscape) this.labelAt('轻掌伤害1 · 按住1.2秒蓄满伤害2\n人物长处不改变攻防数值。', l.hint, 24);
         const opponent = this.cast.find(m => m.source.roleId === this.opponentRole);
-        this.button(`对手：${opponent?.source.displayName ?? '准备中'} · 换人`, this.landscape ? -420 : 0, this.landscape ? -240 : -260, this.landscape ? 350 : 520, () => {
+        this.buttonAt(`对手：${opponent?.source.displayName ?? '准备中'} · 换人`, l.opponent, () => {
             const index = ROLE_IDS.indexOf(this.opponentRole); this.opponentRole = ROLE_IDS[(index + 1) % ROLE_IDS.length]; this.renderPage();
-        }, false, 64);
-        const startY = this.landscape ? -240 : -355;
+        });
         if (this.catalog) {
-            this.button('开始对战', 0, startY, this.landscape ? 400 : 520, () => this.begin('normal'), true);
-            this.button('练习攻防', this.landscape ? 420 : 0, this.landscape ? startY : -465, this.landscape ? 350 : 520, () => this.changePage('practice'));
+            this.buttonAt('开始对战', l.start, () => this.begin('normal'), true);
+            this.buttonAt('练习攻防', l.practice, () => this.changePage('practice'));
         } else {
-            this.panel(0, startY, this.landscape ? 400 : 520, 96, '#1D2C35');
-            this.text('等待人设准备', 0, startY, this.landscape ? 380 : 500, 32, C.ink, 88);
+            this.panelAt(l.start, '#1D2C35'); this.labelAt('等待人设准备', l.start);
         }
     }
 
@@ -474,20 +495,19 @@ export class SlapGame extends Component {
     private introUI(): void {
         if (!this.roundSetup) { this.startupError = '本局人设尚未锁定'; this.page = 'error'; this.renderPage(); return; }
         const cards = projectIntro(this.roundSetup, this.introViewer);
-        this.text('对局前 · 职场往事', 0, this.landscape ? 300 : 520, 680, this.landscape ? 40 : 56);
+        const l = this.layout.intro;
+        this.labelAt('对局前 · 职场往事', l.title, this.landscape ? 40 : 56);
         for (const card of cards) {
             const mine = card.actorId === this.introViewer;
             const position = mine ? 0 : 1;
-            const x = this.landscape ? (position === 0 ? -306 : 306) : 0;
-            const y = this.landscape ? 45 : position === 0 ? 240 : -100;
-            this.panel(x, y, this.landscape ? 568 : 664, this.landscape ? 380 : 300);
-            this.text(mine ? '你眼中的自己' : '这位对手的职场往事', x, y + (this.landscape ? 145 : 112), 540, 32, mine ? C.blue : C.orange, 50);
-            this.portrait(card.roleId, x - (this.landscape ? 170 : 222), y - 12, this.landscape ? 180 : 176);
-            this.text(`${card.displayName} · ${mine ? '你' : '对手'}`, x + (this.landscape ? 88 : 84), y + (this.landscape ? 65 : 45), this.landscape ? 326 : 430, 32, mine ? C.blue : C.orange, 56);
-            this.text(card.text, x + (this.landscape ? 88 : 84), y - (this.landscape ? 75 : 55), this.landscape ? 308 : 420, 32, C.ink, this.landscape ? 200 : 150);
+            this.panelAt(l.cards[position]);
+            this.labelAt(mine ? '你眼中的自己' : '这位对手的职场往事', l.facets[position], 32, mine ? C.blue : C.orange);
+            const portrait = l.portraits[position]; this.portrait(card.roleId, portrait.x, portrait.y, Math.min(portrait.width, portrait.height));
+            this.labelAt(`${card.displayName} · ${mine ? '你' : '对手'}`, l.names[position], 32, mine ? C.blue : C.orange);
+            this.labelAt(card.text, l.stories[position]);
         }
-        this.button('进入对局', this.landscape ? 170 : 0, this.landscape ? -245 : -400, 520, () => this.enterBattle(), true);
-        this.button('返回选择', this.landscape ? -430 : 0, this.landscape ? -245 : -510, this.landscape ? 300 : 520, () => this.backToMenu());
+        this.buttonAt('进入对局', l.enter, () => this.enterBattle(), true);
+        this.buttonAt('返回选择', l.back, () => this.backToMenu());
     }
 
     private publishCastDiagnostics(): void {
@@ -497,6 +517,21 @@ export class SlapGame extends Component {
             opponentRole: this.opponentRole, viewerActorId: this.introViewer, controlledActorId: 0,
             intro: this.roundSetup ? projectIntro(this.roundSetup, this.introViewer) : null,
             state: this.session?.snapshot() ?? null, cast: this.skinEvidence(), generation: this.loadGeneration }));
+        const dpr = screen.devicePixelRatio, viewport = view.getViewportRect(), frame = screen.windowSize;
+        const cssRect = (rect: LayoutRect) => ({
+            x: (viewport.x + (rect.x + this.width / 2 - rect.width / 2) * view.getScaleX()) / dpr,
+            y: (frame.height - viewport.y - (rect.y + this.height / 2 + rect.height / 2) * view.getScaleY()) / dpr,
+            width: rect.width * view.getScaleX() / dpr, height: rect.height * view.getScaleY() / dpr,
+        });
+        const rectFor = (transform: UITransform): LayoutRect => ({ x: transform.node.position.x, y: transform.node.position.y,
+            width: transform.width, height: transform.height });
+        const controls = this.buttons.map(button => ({ name: button.name, text: button.label.string,
+            ui: rectFor(button.transform), css: cssRect(rectFor(button.transform)) }));
+        if (this.attack) controls.push({ name: 'attack', text: this.attackLabel?.string ?? '', ui: rectFor(this.attack), css: cssRect(rectFor(this.attack)) });
+        if (this.guard) controls.push({ name: 'guard', text: this.guardLabel?.string ?? '', ui: rectFor(this.guard), css: cssRect(rectFor(this.guard)) });
+        this.motionDiagnosticCanvas.setAttribute('data-slap-layout', JSON.stringify({ build: BUILD_ID, page: this.page,
+            design: { width: this.width, height: this.height }, window: { width: frame.width / dpr, height: frame.height / dpr },
+            safe: this.layout.safe, cssScale: { x: view.getScaleX() / dpr, y: view.getScaleY() / dpr }, controls }));
     }
 
     private renderPage(): void {
@@ -510,85 +545,84 @@ export class SlapGame extends Component {
         this.attackLabel = this.guardLabel = this.statusLabel = this.resultLabel = this.timerLabel = null;
         this.hpLabels = []; this.hpBars = []; this.chargeBar = null;
         if (this.page === 'battle') { this.battleUI(); return; }
-        if (this.page !== 'result') this.panel(0, 0, this.width, this.height, C.bg);
-        const top = this.landscape ? 260 : 500;
+        if (this.page !== 'result') {
+            // SHOW_ALL's design rectangle can be narrower than the full window.
+            // Cover those margins too, with padding beyond rounded corners.
+            const frame = screen.windowSize;
+            this.panel(0, 0, frame.width / view.getScaleX() + 32, frame.height / view.getScaleY() + 32, C.bg);
+        }
+        const l = this.layout, common = l.common;
         if (this.page === 'menu') {
             this.selectionUI();
         } else if (this.page === 'practice') {
-            this.text('练习攻防', 0, top, 640, 56);
-            this.text('固定节奏，同一套规则。\n读懂前摇，再抓住时机。', 0, top - 100, 640, 24, C.ink, 96);
+            this.labelAt('练习攻防', common.title, 56);
+            this.labelAt('固定节奏，同一套规则。\n读懂前摇，再抓住时机。', common.description, 24);
             const selected = this.cast.find(m => m.source.roleId === this.selectedRole);
-            this.text(`你的人设：${selected?.source.displayName ?? ''}`, 0, top - (this.landscape ? 150 : 190), 640, 32, C.blue, 40);
-            const y = this.landscape ? 35 : 150;
-            this.button('命中练习', 0, y, 520, () => this.begin('hit'), true);
-            this.button('格挡练习', 0, y - 112, 520, () => this.begin('block'));
-            this.button('精准反击练习', 0, y - 224, 520, () => this.begin('parry'));
-            this.button('返回选择', this.landscape ? -480 : 0, this.landscape ? -260 : y - 352, this.landscape ? 240 : 520, () => this.changePage('menu'));
+            this.labelAt(`你的人设：${selected?.source.displayName ?? ''}`, common.role, 32, C.blue);
+            this.buttonAt('命中练习', common.primary, () => this.begin('hit'), true);
+            this.buttonAt('格挡练习', common.secondary, () => this.begin('block'));
+            this.buttonAt('精准反击练习', common.tertiary, () => this.begin('parry'));
+            this.buttonAt('返回选择', common.back, () => this.changePage('menu'));
         } else if (this.page === 'loading') {
-            this.text('正在准备对战…', 0, 0, 640, 40);
-            this.button('返回选择', 0, -120, 520, () => this.backToMenu());
+            this.labelAt('正在准备对战…', l.box(0, 0, 640, 80), 40);
+            this.buttonAt('返回选择', l.target(0, -120, 520, 96), () => this.backToMenu());
         } else if (this.page === 'intro') {
             this.introUI();
         } else if (this.page === 'error') {
-            this.text('对战未能启动', 0, 100, 640, 40);
-            this.text(this.startupError || '角色资源未能准备，请返回选择后重试。', 0, 20, 640, 32, C.ink, 100);
-            this.button('返回选择', 0, -130, 520, () => this.backToMenu(), true);
+            this.labelAt('对战未能启动', l.box(0, 120, 640, 80), 40);
+            this.labelAt(this.startupError || '角色资源未能准备，请返回选择后重试。', l.box(0, 20, 640, 110));
+            this.buttonAt('返回选择', l.target(0, -130, 520, 96), () => this.backToMenu(), true);
         } else if (this.page === 'paused' || this.page === 'confirm') {
-            this.text(this.page === 'paused' ? '已暂停' : '放弃这局？', 0, 150, 640, 56);
-            this.text(this.page === 'paused' ? '准备好再继续。' : '本局进度不会保留。', 0, 50, 640, 32);
-            this.button('继续对战', 0, -60, 520, () => this.resume(), true);
-            this.button(this.page === 'paused' ? '返回选择' : '放弃并返回', 0, -180, 520,
-                () => this.page === 'paused' ? this.changePage('confirm') : this.backToMenu(), false, 96,
+            this.labelAt(this.page === 'paused' ? '已暂停' : '放弃这局？', l.box(0, 150, 640, 80), 56);
+            this.labelAt(this.page === 'paused' ? '准备好再继续。' : '本局进度不会保留。', l.box(0, 50, 640, 64));
+            this.buttonAt('继续对战', l.target(0, -60, 520, 96), () => this.resume(), true);
+            this.buttonAt(this.page === 'paused' ? '返回选择' : '放弃并返回', l.target(0, -180, 520, 96),
+                () => this.page === 'paused' ? this.changePage('confirm') : this.backToMenu(), false,
                 this.page === 'confirm' ? 'danger' : 'normal');
         } else if (this.page === 'result') {
             const result = this.session?.snapshot().result;
-            const headingY = this.height / 2 - (this.landscape ? 64 : 100);
-            const footerY = -this.height / 2 + (this.landscape ? 72 : 232);
-            this.panel(0, headingY - 48, this.width, this.landscape ? 176 : 208, C.bg);
-            this.panel(0, footerY - 48, this.width, this.landscape ? 176 : 304, C.bg);
-            this.text(result === 'player' ? '你赢了' : result === 'bot' ? '这局输了' : '平局', 0, headingY, 640, this.landscape ? 40 : 56, C.gold);
+            // Only header/footer panels cover the world; the real result actors
+            // keep their central window throughout the independent visual clock.
+            this.panelAt(l.box(0, this.height / 2 - 94, this.width, 188), C.bg);
+            this.panelAt(l.box(0, -this.height / 2 + (this.landscape ? 100 : 178), this.width, this.landscape ? 200 : 356), C.bg);
+            this.labelAt(result === 'player' ? '你赢了' : result === 'bot' ? '这局输了' : '平局', l.result.title, this.landscape ? 40 : 56, C.gold);
             const state = this.session!.snapshot();
-            this.text(`剩余生命  ${state.fighters[0].hp} : ${state.fighters[1].hp}`, 0, headingY - 64, 640, 32);
-            if (!this.landscape) this.text(this.mode === 'charge' ? '本局：蓄力出掌' : '本局：点击出掌', 0, headingY - 116, 640, 24);
-            this.button(this.practice === 'normal' ? '再来一局' : '重试练习', this.landscape ? -290 : 0, footerY, this.landscape ? 420 : 520, () => this.begin(this.practice, true), true);
-            this.button('换个人设', this.landscape ? 290 : 0, this.landscape ? footerY : footerY - 120, this.landscape ? 420 : 520, () => this.backToMenu());
+            this.labelAt(`剩余生命  ${state.fighters[0].hp} : ${state.fighters[1].hp}`, l.result.hp);
+            if (!this.landscape) this.labelAt(this.mode === 'charge' ? '本局：蓄力出掌' : '本局：点击出掌', l.result.mode, 24);
+            this.buttonAt(this.practice === 'normal' ? '再来一局' : '重试练习', l.result.retry, () => this.begin(this.practice, true), true);
+            this.buttonAt('换个人设', l.result.change, () => this.backToMenu());
         }
-        const buildLabel = BUILD_ID.split('-').slice(0, 3).join('-');
-        const buildText = this.landscape ? `构建 ${buildLabel} · 规则 ${DEFAULT_RULES.version}` : `构建 ${buildLabel}\n规则 ${DEFAULT_RULES.version}`;
-        this.text(buildText, 0, -this.height / 2 + (this.landscape ? 32 : 60), this.width - 32, 24, C.ink, this.landscape ? 40 : 88);
+        if (this.page === 'menu' || this.page === 'paused' || this.page === 'result') {
+            const buildLabel = BUILD_ID.split('-').slice(0, 3).join('-');
+            this.labelAt(`构建 ${buildLabel}`, common.build, 24);
+        }
     }
 
     private battleUI(): void {
-        const safe = sys.getSafeAreaRect(false);
-        const safeInset = Math.max(0, this.height - safe.yMax);
-        const top = this.height / 2 - 64 - Math.min(safeInset, 64);
-        const hpX = this.landscape ? 420 : 190;
+        const l = this.layout.battle;
         for (let i = 0; i < 2; i++) {
-            const x = i === 0 ? -hpX : hpX;
-            this.hpLabels.push(this.text(`${i === 0 ? '你' : '机器人'}  5/5`, x, top, 260, 32, i === 0 ? C.blue : C.orange));
-            this.text(this.roundSetup?.actors[i].displayName ?? '', x, top + 40, 300, 24, i === 0 ? C.blue : C.orange, 40);
-            this.hpBars.push(this.panel(x, top - 48, 240, 16));
+            this.hpLabels.push(this.labelAt(`${i === 0 ? '你' : '机器人'}  5/5`, l.hp[i], 32, i === 0 ? C.blue : C.orange));
+            this.labelAt(this.roundSetup?.actors[i].displayName ?? '', l.roles[i], 24, i === 0 ? C.blue : C.orange);
+            this.hpBars.push(this.panelAt(l.hpBars[i]));
         }
-        this.button('暂停', 0, top - 12, 112, () => this.pause(), false, 96);
-        this.timerLabel = this.text('', 0, top - 100, 300, 24, C.ink, 48);
-        const controlsY = this.landscape ? -220 : -this.height / 2 + 136;
-        const controlsX = this.landscape ? 460 : 162;
-        this.guardPanel = this.panel(-controlsX, controlsY, 300, 160);
-        this.attackPanel = this.panel(controlsX, controlsY, 300, 160, C.gold);
+        this.buttonAt('暂停', l.pause, () => this.pause());
+        this.timerLabel = this.labelAt('', l.timer, 24);
+        this.guardPanel = this.panelAt(l.guard);
+        this.attackPanel = this.panelAt(l.attack, C.gold);
         this.guard = this.guardPanel.node.getComponent(UITransform)!;
         this.attack = this.attackPanel.node.getComponent(UITransform)!;
-        this.guardLabel = this.text('防御', -controlsX, controlsY + 16, 280, 32);
-        this.attackLabel = this.text(this.mode === 'charge' ? '按住蓄力' : '点击出掌', controlsX, controlsY + 16, 280, 32, C.bg);
+        this.guardLabel = this.text('防御', l.guard.x, l.guard.y + 16, l.guard.width - 20, 32);
+        this.attackLabel = this.text(this.mode === 'charge' ? '按住蓄力' : '点击出掌', l.attack.x, l.attack.y + 16, l.attack.width - 20, 32, C.bg);
         // Keep the footer's status, instruction and result in separate rows.
         // A practice retry action belongs above the fighters, not in these rows.
-        this.statusLabel = this.text('', 0, this.landscape ? -300 : controlsY + 128, this.landscape ? 580 : 640, 24, C.ink, 48);
-        this.chargeBar = this.panel(controlsX, controlsY - 48, 240, 14, C.panel);
-        this.resultLabel = this.text('', 0, this.landscape ? -110 : -240, this.landscape ? 580 : 640, 40);
+        this.statusLabel = this.labelAt('', l.status, 24);
+        this.chargeBar = this.panel(l.attack.x, l.attack.y - 48, l.attack.width - 60, 14, C.panel);
+        this.resultLabel = this.labelAt('', l.feedback, 40);
         if (this.practice !== 'normal') {
             const hints = { hit: `命中练习：轻击伤害${DEFAULT_RULES.baseDamage}，蓄满伤害${DEFAULT_RULES.chargedDamage}`, block: '格挡练习：来掌前提前按防御', parry: '精准反击练习：贴近命中再按防御' };
-            this.text(hints[this.practice], 0, this.landscape ? top - 116 : top - 160, this.landscape ? 580 : 640, 24, C.ink, 48);
-            this.button('重试练习', this.landscape ? 470 : 0, top - (this.landscape ? 116 : 256), 260, () => this.begin(this.practice, true));
-        } else this.text('提前按可格挡，贴近命中时按可反击', 0, this.landscape ? -190 : -312, this.landscape ? 580 : 640, 24, C.ink, 48);
+            this.labelAt(hints[this.practice], l.hint, 24);
+            this.buttonAt('重试练习', l.retry, () => this.begin(this.practice, true));
+        } else this.labelAt('提前按可格挡，贴近命中时按可反击', l.hint, 24);
         if (this.session) this.drawState(this.session.snapshot());
     }
 
@@ -774,8 +808,9 @@ export class SlapGame extends Component {
             const fighter = state.fighters[i];
             this.hpLabels[i].string = `${i === 0 ? '你' : '机器人'}  ${fighter.hp}/${DEFAULT_RULES.maxHp}`;
             const bar = this.hpBars[i]; bar.clear();
-            bar.fillColor = new Color(C.panel); bar.rect(-120, -8, 240, 16); bar.fill();
-            bar.fillColor = new Color(i === 0 ? C.blue : C.orange); bar.rect(-120, -8, 240 * fighter.hp / DEFAULT_RULES.maxHp, 16); bar.fill();
+            const size = bar.node.getComponent(UITransform)!;
+            bar.fillColor = new Color(C.panel); bar.rect(-size.width / 2, -size.height / 2, size.width, size.height); bar.fill();
+            bar.fillColor = new Color(i === 0 ? C.blue : C.orange); bar.rect(-size.width / 2, -size.height / 2, size.width * fighter.hp / DEFAULT_RULES.maxHp, size.height); bar.fill();
         }
         const names: Record<string, string> = { idle: '', charging: '蓄力中', windup: '出掌中', recovery: '收招中', guard: '防御中', stunned: '受击中', counter: '精准挡住 · 准备反击', parried: '被挡住 · 反击将至', 'counter-recovery': '反击收招中' };
         const charge = me.chargeStartMs === null ? 0 : clamp((state.nowMs - me.chargeStartMs) / DEFAULT_RULES.fullChargeMs);
@@ -788,8 +823,9 @@ export class SlapGame extends Component {
                 ? `按住${DEFAULT_RULES.fullChargeMs / 1000}秒：伤害${DEFAULT_RULES.baseDamage}→${DEFAULT_RULES.chargedDamage}` : `点击出掌 · 命中伤害 ${DEFAULT_RULES.baseDamage}`);
         this.statusLabel!.color = new Color(fullCharge ? C.gold : C.ink);
         this.chargeBar!.clear();
-        this.chargeBar!.fillColor = new Color(C.panel); this.chargeBar!.rect(-120, -7, 240, 14); this.chargeBar!.fill();
-        this.chargeBar!.fillColor = new Color(fullCharge ? C.ink : C.blue); this.chargeBar!.rect(-120, -7, 240 * charge, 14); this.chargeBar!.fill();
+        const chargeWidth = this.chargeBar!.node.getComponent(UITransform)!.width;
+        this.chargeBar!.fillColor = new Color(C.panel); this.chargeBar!.rect(-chargeWidth / 2, -7, chargeWidth, 14); this.chargeBar!.fill();
+        this.chargeBar!.fillColor = new Color(fullCharge ? C.ink : C.blue); this.chargeBar!.rect(-chargeWidth / 2, -7, chargeWidth * charge, 14); this.chargeBar!.fill();
         this.resultLabel!.string = state.nowMs < this.feedbackUntil ? this.feedback : '';
         this.resultLabel!.color = new Color(this.feedbackColor);
         this.timerLabel!.string = `${Math.ceil((DEFAULT_RULES.roundDurationMs - state.nowMs) / 1000)} 秒`;
@@ -797,9 +833,10 @@ export class SlapGame extends Component {
     }
 
     private paintControl(panel: Graphics, color: string): void {
+        const size = panel.node.getComponent(UITransform)!;
         panel.clear();
         panel.fillColor = new Color(color);
-        panel.roundRect(-150, -80, 300, 160, 16);
+        panel.roundRect(-size.width / 2, -size.height / 2, size.width, size.height, 16);
         panel.fill();
     }
 
@@ -809,6 +846,7 @@ export class SlapGame extends Component {
         this.frameDiagnosticCanvas?.removeAttribute('data-slap-diagnostics');
         this.motionDiagnosticCanvas?.removeAttribute('data-slap-motion');
         this.motionDiagnosticCanvas?.removeAttribute('data-slap-cast');
+        this.motionDiagnosticCanvas?.removeAttribute('data-slap-layout');
         if (this.motionDiagnosticCanvas) director.off(Director.EVENT_AFTER_DRAW, this.captureContactFrame, this);
         this.clearContactFrames();
         input.off(Input.EventType.TOUCH_START, this.touchStart, this);
