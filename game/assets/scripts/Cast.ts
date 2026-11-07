@@ -14,6 +14,7 @@ export type CastCatalog = Readonly<Record<RoleId, CastRole>>;
 export interface RoundActor extends CastRole { readonly actorId: ActorId; }
 export interface RoundSelection { readonly playerRoleId: RoleId; readonly opponentRoleId: RoleId; readonly mode: AttackMode; }
 export interface RoundSetup { readonly mode: AttackMode; readonly actors: readonly [RoundActor, RoundActor]; }
+export interface RoundTicket { readonly setup: RoundSetup; readonly generation: number; }
 export interface IntroCard extends CastResources {
   readonly actorId: ActorId; readonly roleId: RoleId; readonly assetRevision: number; readonly displayName: string;
   readonly sourceHash: string; readonly prefabUuid: string; readonly portraitTextureUuid: string;
@@ -83,6 +84,28 @@ export function makeRoundSetup(catalog: CastCatalog, selection: RoundSelection):
     return Object.freeze({ ...role, ...castResource(roleId), actorId, facets: Object.freeze({ ...role.facets }) });
   };
   return Object.freeze({ mode: selection.mode, actors: Object.freeze([actor(0, playerRoleId), actor(1, opponentRoleId)] as [RoundActor, RoundActor]) });
+}
+
+/** A ticket owns one loading/intro/battle lifetime. Async callbacks must still own the current ticket. */
+export class RoundGate {
+  private generation = 0;
+  private current: RoundTicket | null = null;
+
+  start(setup: RoundSetup): RoundTicket | null {
+    if (this.current) return null;
+    this.current = Object.freeze({ setup, generation: ++this.generation });
+    return this.current;
+  }
+  retry(): RoundTicket | null {
+    if (!this.current) return null;
+    const setup = this.current.setup;
+    this.clear();
+    return this.start(setup);
+  }
+  clear(): void { ++this.generation; this.current = null; }
+  isCurrent(ticket: RoundTicket | null | undefined): boolean {
+    return !!ticket && ticket === this.current && ticket.generation === this.generation;
+  }
 }
 
 /** Viewer changes narrative only. Actor order, assets and the single-player control identity stay fixed. */
