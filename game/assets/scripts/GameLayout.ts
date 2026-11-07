@@ -99,7 +99,7 @@ export function layoutFromUiSafeRect(design: DesignSize, safeRect: LayoutRect, c
         status: box(0, landscape ? -300 : controlsY + 128, landscape ? 580 : 640, 48),
         feedback: box(0, landscape ? -110 : -240, landscape ? 580 : 640, 64),
         hint: box(0, landscape ? -190 : -312, landscape ? 580 : 640, 48),
-        retry: target(landscape ? 470 : 0, top - (landscape ? 116 : 256), 260, 96),
+        retry: target(landscape ? 470 : 0, top - (landscape ? 116 : 176), 260, 96),
     });
     const result = Object.freeze({
         title: box(0, landscape ? 304 : 540, 640, landscape ? 64 : 80),
