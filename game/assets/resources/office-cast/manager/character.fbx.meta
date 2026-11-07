@@ -435,8 +435,8 @@
         "splits": [
           {
             "name": "idle",
-            "from": 0.0,
-            "to": 2.0,
+            "from": 0,
+            "to": 2,
             "fps": 60,
             "wrapMode": 2,
             "previousId": "1f586"
@@ -507,8 +507,8 @@
           },
           {
             "name": "counter",
-            "from": 10.0,
-            "to": 11.0,
+            "from": 10,
+            "to": 11,
             "fps": 60,
             "wrapMode": 1,
             "previousId": "8703c"

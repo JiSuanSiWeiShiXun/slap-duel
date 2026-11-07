@@ -68,7 +68,7 @@
       "character.fbx": {
         "path": "game/assets/resources/office-cast/manager/character.fbx",
         "bytes": 1727372,
-        "sha256": "662e3ddc91548ad749081bacd84b296d4a50f9657c5a053b39a3b567452e2a85",
+        "sha256": "29b59c61ea8d414faabc8cb9ed226dcd02b3fe76b027cdab7f8b6188fec3b150",
         "format": "FBX7400"
       },
       "portrait.png": {
@@ -117,14 +117,14 @@
       "triangles": 5802,
       "maxInfluences": 2,
       "blendedVertices": 242,
-      "maxWeightError": 0.0,
+      "maxWeightError": 0,
       "maxEvaluatedDisplacement": 0.9088592579251777,
       "fcurves": 203,
       "sourceClips": [
         {
           "name": "idle",
-          "from": 0.0,
-          "to": 2.0,
+          "from": 0,
+          "to": 2,
           "fps": 60
         },
         {
@@ -177,8 +177,8 @@
         },
         {
           "name": "counter",
-          "from": 10.0,
-          "to": 11.0,
+          "from": 10,
+          "to": 11,
           "fps": 60
         },
         {
@@ -244,9 +244,9 @@
       "animationName": "Scene",
       "animationChannels": 90,
       "wrapperScale": [
-        100.0,
-        100.0,
-        100.0
+        100,
+        100,
+        100
       ]
     },
     "imports": {
