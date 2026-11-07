@@ -34,6 +34,8 @@ export function createStaticServer(root) {
     response.writeHead(200, { 'Content-Type': mime[path.extname(file)] || 'application/octet-stream', 'Content-Length': stat.size });
     if (request.method === 'HEAD') { response.end(); return; }
     const stream = fs.createReadStream(file);
+    // An aborted response can leave a piped file paused before it reaches EOF.
+    response.once('close', () => stream.destroy());
     stream.on('error', () => response.destroy());
     stream.pipe(response);
   });

@@ -95,3 +95,60 @@ test('local static server serves files and rejects traversal/method abuse', asyn
     assert.equal(resolveRequest(root, '/index.html'), path.join(root, 'index.html'));
   } finally { await new Promise(resolve => server.close(resolve)); }
 });
+
+test('aborted static responses close the real file descriptor while the server stays available', async t => {
+  const parent = projectPath('game/local/tooling-tests');
+  fs.mkdirSync(parent, { recursive: true });
+  const root = fs.mkdtempSync(path.join(parent, 'aborted-response-'));
+  const file = path.join(root, 'payload.bin');
+  fs.writeFileSync(file, Buffer.alloc(16 * 1024 * 1024, 0x61));
+  const opened = [];
+  const originalCreateReadStream = fs.createReadStream;
+  t.mock.method(fs, 'createReadStream', (...args) => {
+    const stream = originalCreateReadStream(...args);
+    opened.push(stream);
+    return stream;
+  });
+  const server = createStaticServer(root);
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const url = `http://127.0.0.1:${server.address().port}/payload.bin`;
+  let descriptor;
+  try {
+    await new Promise((resolve, reject) => {
+      const request = http.get(url, response => {
+        response.once('error', reject);
+        response.once('data', () => {
+          descriptor = opened[0]?.fd;
+          response.destroy();
+          resolve();
+        });
+      });
+      request.once('error', reject);
+    });
+    assert.equal(typeof descriptor, 'number', 'a real file descriptor was open during transfer');
+    await new Promise((resolve, reject) => {
+      const stream = opened[0];
+      const deadline = setTimeout(() => reject(new Error('Aborted response left its source file open')), 1000);
+      const closed = () => { clearTimeout(deadline); resolve(); };
+      if (stream.closed) closed();
+      else stream.once('close', closed);
+    });
+    assert.throws(() => fs.fstatSync(descriptor), { code: 'EBADF' });
+    fs.unlinkSync(file);
+    fs.writeFileSync(file, 'rebuilt-file');
+    const body = await new Promise((resolve, reject) => {
+      http.get(url, response => {
+        let result = '';
+        response.setEncoding('utf8');
+        response.on('data', chunk => { result += chunk; });
+        response.once('end', () => resolve(result));
+        response.once('error', reject);
+      }).once('error', reject);
+    });
+    assert.equal(body, 'rebuilt-file');
+  } finally {
+    for (const stream of opened) stream.destroy();
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+  }
+});
