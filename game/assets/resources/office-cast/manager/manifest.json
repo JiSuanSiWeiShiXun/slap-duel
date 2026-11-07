@@ -61,14 +61,14 @@
     }
   },
   "generated": {
-    "generatorSha256": "3624a3951afa7391eebebb478600482bacb0354c649460f49b3df84f5bb016d7",
-    "sourceHash": "9fbfeb5bb5bcb5cacfd27f5d08ea987c0a05f53c75f75795164c6d0ee54daf56",
+    "generatorSha256": "abd8f3d38e0735c59e427cae2bca1c3436cb72aa1415e07f4b3a55407630711e",
+    "sourceHash": "ff49ef76912e0a3c4f807fc96aecf2ac1fe0389344e7a46b922cf3b2f7689b5c",
     "portraitReviewed": true,
     "outputs": {
       "character.fbx": {
         "path": "game/assets/resources/office-cast/manager/character.fbx",
         "bytes": 1727372,
-        "sha256": "348bef7cb4d9988ef7c6861420ade568821e7319d68f69cac2c21d522166eed2",
+        "sha256": "58aecd1d90e4e4bb4293888fdc6a60f085e561736e8c8d03a9ece5c5faffcb61",
         "format": "FBX7400"
       },
       "portrait.png": {

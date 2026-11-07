@@ -73,6 +73,7 @@ export class SlapGame extends Component {
     private portraitFrames: SpriteFrame[] = [];
     private loadGeneration = 0;
     private castError = '';
+    private catalogGeneration = 0;
     private pendingSkinState: BattleState | null = null;
     private pendingPoses: [FighterPose, FighterPose] | null = null;
     private newSkinSample = false;
@@ -250,30 +251,35 @@ export class SlapGame extends Component {
     }
 
     private loadCast(): void {
+        const token = ++this.catalogGeneration;
         resources.loadDir('office-cast', JsonAsset, async (error, assets) => {
-            if (!this.isValid) return;
+            if (!this.isValid || token !== this.catalogGeneration) return;
             try {
                 if (error) throw error;
                 const roles = ['manager', 'veteran', 'rookie'];
-                this.cast = assets.map(asset => asset.json as CastManifest).filter(m => m.schemaVersion === 1 && roles.includes(m.source?.roleId));
-                if (!this.cast.length) throw new Error('No usable office character manifest');
-                for (const manifest of this.cast) {
+                const catalog = assets.map(asset => asset.json as CastManifest).filter(m => m.schemaVersion === 1 && roles.includes(m.source?.roleId));
+                if (!catalog.length) throw new Error('No usable office character manifest');
+                const textures = new Map<RoleId, Texture2D>();
+                for (const manifest of catalog) {
                     const refs = manifest.generated?.imports;
                     if (!refs?.prefabUuid || !refs.skeletonUuid || !refs.portraitTextureUuid || Object.keys(refs.bonePaths).length !== 29) throw new Error('Character import references incomplete');
                     const texture = await this.loadAsset<Texture2D>(refs.portraitTextureUuid);
-                    if (!this.isValid) return;
-                    this.roleTextures.set(manifest.source.roleId, texture);
+                    if (!this.isValid || token !== this.catalogGeneration) return;
+                    textures.set(manifest.source.roleId, texture);
                 }
-                this.cast.sort((a, b) => roles.indexOf(a.source.roleId) - roles.indexOf(b.source.roleId));
-                this.castError = '';
-            } catch (failure) { this.cast = []; this.castError = failure instanceof Error ? failure.message : 'Character loading failed'; console.error(this.castError); }
+                catalog.sort((a, b) => roles.indexOf(a.source.roleId) - roles.indexOf(b.source.roleId));
+                this.cast = catalog; this.roleTextures = textures; this.castError = '';
+            } catch (failure) {
+                if (!this.isValid || token !== this.catalogGeneration) return;
+                this.cast = []; this.castError = failure instanceof Error ? failure.message : 'Character loading failed'; console.error(this.castError);
+            }
             if (this.page === 'menu') this.renderPage();
         });
     }
 
     private clearActors(): void {
         this.pendingSkinState = null; this.pendingPoses = null;
-        for (const actor of this.actors) { actor.animation.stop(); actor.root.destroy(); }
+        for (const actor of this.actors) { actor.root.active = false; actor.animation.stop(); actor.root.destroy(); }
         this.actors = [];
     }
 
@@ -629,7 +635,7 @@ export class SlapGame extends Component {
     private begin(practice: Practice): void {
         if (this.page === 'loading') return;
         this.bridge.cancelAll();
-        this.session?.pause();
+        this.session?.pause(); this.session = null;
         this.practice = practice;
         const token = ++this.loadGeneration;
         this.changePage('loading');
@@ -804,7 +810,7 @@ export class SlapGame extends Component {
     }
 
     onDestroy(): void {
-        ++this.loadGeneration; this.clearActors();
+        ++this.loadGeneration; ++this.catalogGeneration; this.clearActors();
         for (const frame of this.portraitFrames) frame.destroy();
         this.frameDiagnosticCanvas?.removeAttribute('data-slap-diagnostics');
         this.motionDiagnosticCanvas?.removeAttribute('data-slap-motion');

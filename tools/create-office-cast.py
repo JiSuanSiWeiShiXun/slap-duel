@@ -25,6 +25,14 @@ CLIPS = [('idle', 120), ('intro-positive', 60), ('intro-negative', 60),
          ('victory', 90), ('defeat', 90)]
 
 
+def timeline_clips():
+    result, cursor = [], 0
+    for name, duration in CLIPS:
+        result.append({'name': name, 'from': cursor / 60, 'to': (cursor + duration) / 60, 'fps': 60})
+        cursor += duration + 2
+    return result
+
+
 def canonical(value):
     def normalize(item):
         if isinstance(item, dict): return {key: normalize(v) for key, v in item.items()}
@@ -511,11 +519,34 @@ def convert_and_inspect(asset, log_root):
 
 
 def sync_imports(asset, manifest, write_splits=True):
+    expected_clips = timeline_clips()
+    if manifest['generated']['mesh']['sourceClips'] != expected_clips:
+        raise ValueError('Generated source timeline does not match the frozen generator')
     meta_path = bounded(asset / 'character.fbx.meta', ROOT)
     if not meta_path.exists(): raise RuntimeError('First import with Creator before --sync-imports; metadata UUIDs must be real')
     meta = json.loads(meta_path.read_text(encoding='utf-8-sig')); user = meta.setdefault('userData', {})
     settings = user.get('animationImportSettings', [])
     if not settings: raise RuntimeError('Creator has not imported the FBX animation timeline')
+    if len(settings) != 1 or settings[0]['name'] != manifest['generated']['convertedSkin']['animationName']:
+        raise ValueError('Creator raw animation identity does not match the converted FBX')
+    if settings[0]['duration'] + .0001 < expected_clips[-1]['to']:
+        raise ValueError('Creator raw timeline is shorter than the semantic clips')
+    if not write_splits:
+        actual_splits = {entry['name']: entry for entry in settings[0].get('splits', [])}
+        if set(actual_splits) != {entry['name'] for entry in expected_clips}:
+            raise ValueError('Creator semantic split names are incomplete')
+        for expected in expected_clips:
+            actual = actual_splits[expected['name']]
+            if any(abs(actual[key] - expected[key]) > .00001 for key in ('from', 'to')) or actual.get('fps') != 60:
+                raise ValueError('Creator semantic split timing/FPS mismatch: ' + expected['name'])
+        imported_clips = {entry['name'].removesuffix('.animation'): entry for entry in meta['subMetas'].values() if entry['importer'] == 'gltf-animation'}
+        if set(imported_clips) != set(actual_splits):
+            raise ValueError('Creator semantic clip imports are incomplete')
+        for expected in expected_clips:
+            imported = imported_clips[expected['name']]['userData']
+            span = imported.get('span', {})
+            if any(abs(span.get(key, -1) - expected[key]) > .00001 for key in ('from', 'to')) or imported.get('sample') != 60:
+                raise ValueError('Creator imported clip span/sample mismatch: ' + expected['name'])
     if write_splits:
         for setting in settings:
             previous = {entry['name']: entry.get('previousId') for entry in setting.get('splits', [])}
