@@ -94,7 +94,18 @@ test('counter transcript is symmetric and invariant under insertion and simulati
       events: b.drainEvents().map(({ id, actorId, targetId, ...e }) => ({ ...e, actorId: actorId === undefined ? undefined : normalize(actorId), targetId: targetId === undefined ? undefined : normalize(targetId) })) };
   }
   const base = run(0, false, [1]);
+  assert.equal(base.events.filter(e => e.kind === 'counter-hit').length, 1);
   for (const d of [0, 1]) for (const reverse of [false, true]) for (const steps of [[1], [16], [17], [33], [100], [3, 91, 255, 17]]) assert.deepEqual(run(d, reverse, steps), base);
+});
+
+test('parrying a full charge still counters for base damage rather than charged damage', () => {
+  const b = new Battle('test', 'charge');
+  b.submit(command(1, 0, 1, 'charge-start')); b.submit(command(1, 1200, 2, 'charge-release'));
+  b.submit(command(0, 1630, 1, 'guard')); b.advanceTo(1680);
+  assert.deepEqual(b.snapshot().fighters.map(f => f.hp), [5, 5]);
+  b.advanceTo(1860);
+  assert.deepEqual(b.snapshot().fighters.map(f => f.hp), [5, 4]);
+  assert.equal(b.drainEvents().find(e => e.kind === 'counter-hit').damage, DEFAULT_RULES.baseDamage);
 });
 
 test('counter at timeout resolves first; later counters and lethal future contacts are cancelled', () => {

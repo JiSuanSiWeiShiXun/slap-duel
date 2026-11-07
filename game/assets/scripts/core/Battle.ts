@@ -8,10 +8,11 @@ export interface BattleCommand {
 export interface FighterState {
   hp: number;
   mode: AttackMode;
-  phase: 'idle' | 'charging' | 'windup' | 'recovery' | 'guard' | 'stunned';
+  phase: 'idle' | 'charging' | 'windup' | 'recovery' | 'guard' | 'stunned' | 'counter' | 'parried' | 'counter-recovery';
   phaseStartMs: number; phaseEndMs: number;
   guardCharges: number; guardReadyAtMs: number; guardRestoreAtMs: number | null;
   chargeStartMs: number | null; contactAtMs: number | null;
+  counterAtMs: number | null; counterTargetId: ActorId | null; parriedBy: ActorId | null;
 }
 export interface BattleState {
   sessionId: string; nowMs: number; fighters: [FighterState, FighterState];
@@ -19,7 +20,7 @@ export interface BattleState {
 }
 export interface BattleEvent {
   id: string; sessionId: string; atMs: number;
-  kind: 'attack-start' | 'hit' | 'block' | 'parry' | 'rejected' | 'ended';
+  kind: 'attack-start' | 'hit' | 'block' | 'parry' | 'counter-hit' | 'rejected' | 'ended';
   actorId?: ActorId; targetId?: ActorId; damage?: number; reason?: string;
 }
 export interface Rules {
@@ -27,12 +28,14 @@ export interface Rules {
   windupMs: number; recoveryMs: number; stunMs: number; fullChargeMs: number;
   guardDurationMs: number; parryWindowMs: number; maxGuardCharges: number;
   guardCooldownMs: number; guardRestoreMs: number; roundDurationMs: number;
+  counterWindupMs: number; counterRecoveryMs: number;
 }
 export const DEFAULT_RULES: Readonly<Rules> = Object.freeze({
-  version: 'prototype-0.1', maxHp: 5, baseDamage: 1, chargedDamage: 2,
+  version: 'prototype-0.2', maxHp: 5, baseDamage: 1, chargedDamage: 2,
   windupMs: 480, recoveryMs: 600, stunMs: 350, fullChargeMs: 1200,
   guardDurationMs: 300, parryWindowMs: 80, maxGuardCharges: 2,
   guardCooldownMs: 650, guardRestoreMs: 1800, roundDurationMs: 60000,
+  counterWindupMs: 180, counterRecoveryMs: 260,
 });
 const ACTIONS: readonly string[] = ['charge-start', 'charge-release', 'charge-cancel', 'attack', 'guard'];
 const ACTORS: readonly ActorId[] = [0, 1];
@@ -60,7 +63,7 @@ export class Battle {
     const fighter = (): FighterState => ({
       hp: rules.maxHp, mode, phase: 'idle', phaseStartMs: 0, phaseEndMs: 0,
       guardCharges: rules.maxGuardCharges, guardReadyAtMs: 0, guardRestoreAtMs: null,
-      chargeStartMs: null, contactAtMs: null,
+      chargeStartMs: null, contactAtMs: null, counterAtMs: null, counterTargetId: null, parriedBy: null,
     });
     this.state = { sessionId, nowMs: 0, fighters: [fighter(), fighter()], result: null };
     this.state.fighters[1].mode = opponentMode;
@@ -99,8 +102,9 @@ export class Battle {
       if (this.queue.length) next = Math.min(next, this.queue[0].atMs);
       for (const fighter of this.state.fighters) {
         if (fighter.contactAtMs !== null) next = Math.min(next, fighter.contactAtMs);
+        if (fighter.counterAtMs !== null) next = Math.min(next, fighter.counterAtMs);
         if (fighter.guardRestoreAtMs !== null) next = Math.min(next, fighter.guardRestoreAtMs);
-        if (fighter.phase !== 'idle' && fighter.phase !== 'charging' && fighter.phase !== 'windup') next = Math.min(next, fighter.phaseEndMs);
+        if (this.expiresNormally(fighter)) next = Math.min(next, fighter.phaseEndMs);
       }
       if (next <= this.state.nowMs) throw new Error('Combat schedule failed to advance');
       this.state.nowMs = next;
@@ -134,10 +138,10 @@ export class Battle {
         fighter.guardCharges = Math.min(this.rules.maxGuardCharges, fighter.guardCharges + 1);
         fighter.guardRestoreAtMs = fighter.guardCharges === this.rules.maxGuardCharges ? null : now + this.rules.guardRestoreMs;
       }
-      if (fighter.phase !== 'idle' && fighter.phase !== 'charging' && fighter.phase !== 'windup' && fighter.phaseEndMs <= now) this.setPhase(fighter, 'idle', now);
+      if (this.expiresNormally(fighter) && fighter.phaseEndMs <= now) this.setPhase(fighter, 'idle', now);
     }
     while (this.queue.length && this.queue[0].atMs === now) this.apply(this.queue.shift()!);
-    const contacts = ACTORS.filter(actor => this.state.fighters[actor].contactAtMs === now);
+    const contacts = ACTORS.filter(actor => this.state.fighters[actor].contactAtMs === now || this.state.fighters[actor].counterAtMs === now);
     if (contacts.length) this.resolveContacts(contacts);
     if (!this.state.result && now === this.rules.roundDurationMs) this.finish();
   }
@@ -187,13 +191,19 @@ export class Battle {
     // Read both defenses from one pre-contact snapshot; no side gets first-hit priority.
     const before = this.snapshot();
     const losses: [number, number] = [0, 0];
+    const parries: { actor: ActorId; target: ActorId }[] = [];
     for (const actor of contacts) {
-      const target = (1 - actor) as ActorId;
+      const counter = before.fighters[actor].counterAtMs === this.state.nowMs;
+      const target = counter ? before.fighters[actor].counterTargetId! : (1 - actor) as ActorId;
       const defender = before.fighters[target];
-      if (defender.phase === 'guard') {
+      if (counter) {
+        // Confirmed counters never re-enter guard/parry detection.
+        losses[target] += this.rules.baseDamage;
+        this.emit('counter-hit', { actorId: actor, targetId: target, damage: this.rules.baseDamage });
+      } else if (defender.phase === 'guard') {
         if (this.state.nowMs - defender.phaseStartMs < this.rules.parryWindowMs) {
-          losses[actor] += this.rules.baseDamage;
-          this.emit('parry', { actorId: target, targetId: actor, damage: this.rules.baseDamage });
+          parries.push({ actor: target, target: actor });
+          this.emit('parry', { actorId: target, targetId: actor, damage: 0 });
         } else this.emit('block', { actorId: target, targetId: actor, damage: 0 });
       } else {
         losses[target] += this.damage[actor];
@@ -203,7 +213,9 @@ export class Battle {
     for (const actor of contacts) {
       const fighter = this.state.fighters[actor];
       fighter.contactAtMs = null;
-      this.setPhase(fighter, 'recovery', this.state.nowMs + this.rules.recoveryMs);
+      const counter = before.fighters[actor].counterAtMs === this.state.nowMs;
+      fighter.counterAtMs = null; fighter.counterTargetId = null;
+      this.setPhase(fighter, counter ? 'counter-recovery' : 'recovery', this.state.nowMs + (counter ? this.rules.counterRecoveryMs : this.rules.recoveryMs));
     }
     for (const actor of ACTORS) {
       if (!losses[actor]) continue;
@@ -211,9 +223,24 @@ export class Battle {
       fighter.hp = Math.max(0, fighter.hp - losses[actor]);
       fighter.contactAtMs = null;
       fighter.chargeStartMs = null;
+      fighter.counterAtMs = null; fighter.counterTargetId = null; fighter.parriedBy = null;
       this.setPhase(fighter, 'stunned', this.state.nowMs + this.rules.stunMs);
     }
+    // Install locks last: ordinary recovery must never overwrite a newly confirmed chain.
+    for (const { actor, target } of parries) {
+      const counterAt = this.state.nowMs + this.rules.counterWindupMs;
+      const fighter = this.state.fighters[actor], blocked = this.state.fighters[target];
+      fighter.contactAtMs = null; fighter.chargeStartMs = null;
+      fighter.counterAtMs = counterAt; fighter.counterTargetId = target;
+      this.setPhase(fighter, 'counter', counterAt);
+      blocked.contactAtMs = null; blocked.chargeStartMs = null; blocked.parriedBy = actor;
+      this.setPhase(blocked, 'parried', counterAt);
+    }
     if (this.state.fighters.some(f => f.hp === 0)) this.finish();
+  }
+
+  private expiresNormally(fighter: FighterState): boolean {
+    return fighter.phase === 'guard' || fighter.phase === 'recovery' || fighter.phase === 'stunned' || fighter.phase === 'counter-recovery';
   }
 
   private setPhase(fighter: FighterState, phase: FighterState['phase'], end: number): void {
@@ -225,6 +252,11 @@ export class Battle {
     const [player, bot] = this.state.fighters;
     this.state.result = player.hp === bot.hp ? 'draw' : player.hp > bot.hp ? 'player' : 'bot';
     this.queue = [];
+    for (const fighter of this.state.fighters) {
+      fighter.contactAtMs = null; fighter.counterAtMs = null; fighter.counterTargetId = null;
+      fighter.parriedBy = null; fighter.chargeStartMs = null;
+      if (fighter.phase === 'counter' || fighter.phase === 'parried') this.setPhase(fighter, 'idle', this.state.nowMs);
+    }
     this.emit('ended', { reason: this.state.result });
   }
 

@@ -1,6 +1,6 @@
 import {
     _decorator, Component, Node, Camera, Canvas, UITransform, Layers, Color, Vec3,
-    MeshRenderer, Material, Mesh, primitives, utils, Label, Graphics,
+    MeshRenderer, Material, Mesh, primitives, utils, Label, Graphics, Quat,
     input, Input, EventTouch, game, Game, view, screen, ResolutionPolicy, sys, DirectionalLight, profiler,
 } from 'cc';
 import { ActionKind, AttackMode, BattleState, BattleEvent, DEFAULT_RULES } from './core/Battle';
@@ -8,12 +8,14 @@ import { LocalSession } from './session/LocalSession';
 import { InputBridge } from './InputBridge';
 import { latestContact, contactText } from './Feedback';
 import { BUILD_ID } from './BuildInfo';
+import { ParryMotion, FighterPose, ArmPose, Point } from './ParryMotion';
 
 const { ccclass } = _decorator;
 type Page = 'menu' | 'practice' | 'loading' | 'battle' | 'paused' | 'confirm' | 'result' | 'error';
 type Practice = 'normal' | 'hit' | 'block' | 'parry';
 type Button = { transform: UITransform; label: Label; action: () => void };
-type Figure = { root: Node; head: Node; hand: Node; otherHand: Node; direction: number };
+type Arm = { shoulder: Node; elbow: Node; wrist: Node; upper: Node; forearm: Node; palm: Node };
+type Figure = { root: Node; body: Node; head: Node; arms: { lead: Arm; rear: Arm } };
 const C = { bg: '#16232C', panel: '#293C48', ink: '#F5F4EF', gold: '#FFD166', blue: '#73C5D5', orange: '#E6A17A', danger: '#F47C7C' };
 const clamp = (n: number) => Math.max(0, Math.min(1, n));
 
@@ -53,6 +55,7 @@ export class SlapGame extends Component {
     private materials: Material[] = [];
     private meshes: Mesh[] = [];
     private seenEvents = new Set<string>();
+    private motion = new ParryMotion();
     private feedback = '';
     private feedbackUntil = 0;
     private feedbackColor = C.ink;
@@ -172,16 +175,51 @@ export class SlapGame extends Component {
         const root = new Node(direction === 1 ? 'Player' : 'Bot');
         this.world.addChild(root);
         root.setPosition(x, 0, 0);
-        this.shape(root, 'Torso', 'box', [0.7, 0.85, 0.48], [0, 0.95, 0], color);
+        const body = new Node('TorsoPivot'); root.addChild(body);
+        this.shape(body, 'Torso', 'box', [0.7, 0.85, 0.48], [0, 0.95, 0], color);
         this.shape(root, 'LeftLeg', 'box', [0.25, 0.55, 0.3], [-0.2, 0.27, 0], '#20313D');
         this.shape(root, 'RightLeg', 'box', [0.25, 0.55, 0.3], [0.2, 0.27, 0], '#20313D');
-        const head = this.shape(root, 'Head', 'sphere', [0.85, 0.9, 0.8], [0, 1.8, 0], '#F0CEAE');
+        const headPivot = new Node('HeadPivot'); body.addChild(headPivot); headPivot.setPosition(0, 1.8, 0);
+        const head = this.shape(headPivot, 'Head', 'sphere', [0.85, 0.9, 0.8], [0, 0, 0], '#F0CEAE');
         this.shape(head, 'EyeLeft', 'sphere', [0.08, 0.08, 0.04], [-0.15, 0.05, 0.47], C.bg);
         this.shape(head, 'EyeRight', 'sphere', [0.08, 0.08, 0.04], [0.15, 0.05, 0.47], C.bg);
         this.shape(head, 'Mouth', 'box', [0.2, 0.035, 0.025], [0, -0.15, 0.48], C.bg);
-        const hand = this.shape(root, 'SlapHand', 'sphere', [0.33, 0.42, 0.16], [direction * 0.48, 1.25, 0.48], '#F0CEAE');
-        const otherHand = this.shape(root, 'OtherHand', 'sphere', [0.28, 0.35, 0.16], [-direction * 0.43, 1.05, 0.3], '#F0CEAE');
-        return { root, head, hand, otherHand, direction };
+        const makeArm = (name: string): Arm => {
+            const shoulder = new Node(`${name}Shoulder`); body.addChild(shoulder);
+            const elbow = new Node(`${name}Elbow`); shoulder.addChild(elbow);
+            const wrist = new Node(`${name}Wrist`); elbow.addChild(wrist);
+            const upper = this.shape(shoulder, `${name}UpperArm`, 'box', [0.14, 0.4, 0.14], [0, 0, 0], color);
+            const forearm = this.shape(elbow, `${name}Forearm`, 'box', [0.12, 0.4, 0.12], [0, 0, 0], '#F0CEAE');
+            const palm = this.shape(wrist, `${name}Palm`, 'sphere', [0.33, 0.42, 0.16], [0, 0, 0], '#F0CEAE');
+            return { shoulder, elbow, wrist, upper, forearm, palm };
+        };
+        return { root, body, head: headPivot, arms: { lead: makeArm('Lead'), rear: makeArm('Rear') } };
+    }
+
+    private poseArm(arm: Arm, pose: ArmPose): void {
+        arm.shoulder.setWorldPosition(...pose.shoulder);
+        arm.elbow.setWorldPosition(...pose.elbow);
+        arm.wrist.setWorldPosition(...pose.wrist);
+        const segment = (node: Node, a: Point, b: Point, width: number) => {
+            const delta = new Vec3(b[0] - a[0], b[1] - a[1], b[2] - a[2]);
+            const length = delta.length();
+            node.setWorldPosition((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2);
+            node.setScale(width, Math.max(0.001, length), width);
+            node.setWorldRotation(Quat.rotationTo(new Quat(), Vec3.UP, delta.normalize()));
+        };
+        segment(arm.upper, pose.shoulder, pose.elbow, 0.14);
+        segment(arm.forearm, pose.elbow, pose.wrist, 0.12);
+        arm.palm.setWorldPosition(...pose.palm);
+        arm.palm.setWorldRotationFromEuler(0, pose.palmYaw, 0);
+    }
+
+    private poseFigure(figure: Figure, pose: FighterPose): void {
+        figure.body.setWorldPosition(...pose.body);
+        figure.body.setRotationFromEuler(0, pose.bodyYaw, pose.bodyRoll);
+        figure.head.setWorldPosition(...pose.head);
+        figure.head.setRotationFromEuler(0, 0, pose.headRoll);
+        this.poseArm(figure.arms.lead, pose.arms.lead);
+        this.poseArm(figure.arms.rear, pose.arms.rear);
     }
 
     private buildCanvas(): void {
@@ -382,6 +420,7 @@ export class SlapGame extends Component {
                 }
                 this.session = new LocalSession({ sessionId: `local-${++this.round}`, mode: this.mode, practice, seed: 104729 });
                 this.clockMs = 0; this.sequence = 0;
+                this.motion.reset(this.session.snapshot().sessionId);
                 this.seenEvents.clear(); this.trace = []; this.feedback = ''; this.feedbackUntil = 0;
                 if (this.hidden) { this.session.pause(); this.changePage('paused'); }
                 else this.changePage('battle');
@@ -429,6 +468,7 @@ export class SlapGame extends Component {
     private backToMenu(): void {
         this.bridge.cancelAll(); this.session?.pause(); this.session = null;
         this.seenEvents.clear(); this.trace = []; this.changePage('menu');
+        this.motion.reset();
     }
     private hide(): void { this.hidden = true; this.pause(); }
     private show(): void { this.hidden = false; /* Only Continue resumes an active match. */ }
@@ -468,10 +508,11 @@ export class SlapGame extends Component {
             if (this.trace.length > 32) this.trace.shift();
             fresh.push(event);
         }
+        if (this.session) this.motion.consume(this.session.snapshot(), fresh);
         const chosen = latestContact(fresh);
         if (!chosen) return;
         this.feedback = contactText(chosen);
-        this.feedbackColor = chosen.actorId === 0 && (chosen.kind === 'parry' || (chosen.kind === 'hit' && (chosen.damage ?? 0) > DEFAULT_RULES.baseDamage)) ? C.gold : C.ink;
+        this.feedbackColor = chosen.actorId === 0 && (chosen.kind === 'counter-hit' || (chosen.kind === 'hit' && (chosen.damage ?? 0) > DEFAULT_RULES.baseDamage)) ? C.gold : C.ink;
         this.feedbackUntil = chosen.atMs + 800;
     }
 
@@ -491,23 +532,16 @@ export class SlapGame extends Component {
             this.guardAvailable = guardAvailable;
             this.paintControl(this.guardPanel!, guardAvailable ? C.panel : '#1D2C35');
         }
+        const poses = this.motion.sample(state);
         for (let i = 0; i < 2; i++) {
             const fighter = state.fighters[i];
             this.hpLabels[i].string = `${i === 0 ? '你' : '机器人'}  ${fighter.hp}/${DEFAULT_RULES.maxHp}`;
             const bar = this.hpBars[i]; bar.clear();
             bar.fillColor = new Color(C.panel); bar.rect(-120, -8, 240, 16); bar.fill();
             bar.fillColor = new Color(i === 0 ? C.blue : C.orange); bar.rect(-120, -8, 240 * fighter.hp / DEFAULT_RULES.maxHp, 16); bar.fill();
-            const figure = this.figures[i];
-            const age = state.nowMs - fighter.phaseStartMs;
-            let reach = 0;
-            if (fighter.phase === 'windup') reach = age < DEFAULT_RULES.windupMs * 0.7 ? -0.2 : clamp((age / DEFAULT_RULES.windupMs - 0.7) / 0.3) * 1.7;
-            if (fighter.phase === 'recovery') reach = 1.7 * (1 - clamp(age / 220));
-            if (fighter.phase === 'charging') reach = -0.22 + Math.sin(state.nowMs / 70) * 0.04;
-            figure.hand.setPosition(figure.direction * (0.48 + reach), fighter.phase === 'guard' ? 1.8 : 1.3 + clamp(reach) * 0.45, 0.48);
-            figure.otherHand.setPosition(-figure.direction * 0.43, fighter.phase === 'guard' ? 1.6 : 1.05, 0.3);
-            figure.head.setRotationFromEuler(0, 0, fighter.phase === 'stunned' ? -figure.direction * Math.sin(clamp(age / DEFAULT_RULES.stunMs) * Math.PI) * 20 : 0);
+            this.poseFigure(this.figures[i], poses[i]);
         }
-        const names: Record<string, string> = { idle: '', charging: '蓄力中', windup: '出掌中', recovery: '收招中', guard: '防御中', stunned: '受击中' };
+        const names: Record<string, string> = { idle: '', charging: '蓄力中', windup: '出掌中', recovery: '收招中', guard: '防御中', stunned: '受击中', counter: '精准挡住 · 准备反击', parried: '被挡住 · 反击将至', 'counter-recovery': '反击收招中' };
         const charge = me.chargeStartMs === null ? 0 : clamp((state.nowMs - me.chargeStartMs) / DEFAULT_RULES.fullChargeMs);
         const fullCharge = me.phase === 'charging' && charge >= 1;
         this.attackLabel!.string = me.phase === 'charging' ? fullCharge ? '满蓄力 · 松手' : '松手轻击' : this.mode === 'charge' ? '按住蓄力' : '点击出掌';
@@ -540,6 +574,7 @@ export class SlapGame extends Component {
         game.off(Game.EVENT_HIDE, this.hide, this); game.off(Game.EVENT_SHOW, this.show, this);
         view.off('canvas-resize', this.resize, this);
         this.bridge.cancelAll(); this.session?.pause();
+        this.motion.reset();
         for (const mesh of this.meshes) mesh.destroy();
         for (const material of this.materials) material.destroy();
         delete (globalThis as unknown as Record<string, unknown>).__SLAP_DEBUG__;
