@@ -22,6 +22,7 @@ game/.test-build/
 
 # Private planning, project management, recordings, QR previews and evidence.
 /.planning/
+/.gsd/
 /.notion-pm-private/
 /AGENTS.md
 /docs/**
