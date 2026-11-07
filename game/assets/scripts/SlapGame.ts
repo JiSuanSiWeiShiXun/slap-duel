@@ -583,8 +583,11 @@ export class SlapGame extends Component {
             const result = this.session?.snapshot().result;
             // Only header/footer panels cover the world; the real result actors
             // keep their central window throughout the independent visual clock.
-            this.panelAt(l.box(0, this.height / 2 - 94, this.width, 188), C.bg);
-            this.panelAt(l.box(0, -this.height / 2 + (this.landscape ? 100 : 178), this.width, this.landscape ? 200 : 356), C.bg);
+            const bandWidth = screen.windowSize.width / view.getScaleX() + 32;
+            const headerBand = l.box(0, this.height / 2 - 94, this.width, 188);
+            const footerBand = l.box(0, -this.height / 2 + (this.landscape ? 100 : 178), this.width, this.landscape ? 200 : 356);
+            this.panelAt({ ...headerBand, x: 0, width: bandWidth }, C.bg);
+            this.panelAt({ ...footerBand, x: 0, width: bandWidth }, C.bg);
             this.labelAt(result === 'player' ? '你赢了' : result === 'bot' ? '这局输了' : '平局', l.result.title, this.landscape ? 40 : 56, C.gold);
             const state = this.session!.snapshot();
             this.labelAt(`剩余生命  ${state.fighters[0].hp} : ${state.fighters[1].hp}`, l.result.hp);
