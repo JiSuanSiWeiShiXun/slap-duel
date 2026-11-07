@@ -8,14 +8,14 @@ import { LocalSession } from './session/LocalSession';
 import { InputBridge } from './InputBridge';
 import { latestContact, contactText } from './Feedback';
 import { BUILD_ID } from './BuildInfo';
-import { ParryMotion, FighterPose, ArmPose, Point } from './ParryMotion';
+import { ParryMotion, FighterPose, ArmPose, Point, DEFAULT_ANCHORS } from './ParryMotion';
 
 const { ccclass } = _decorator;
 type Page = 'menu' | 'practice' | 'loading' | 'battle' | 'paused' | 'confirm' | 'result' | 'error';
 type Practice = 'normal' | 'hit' | 'block' | 'parry';
 type Button = { transform: UITransform; label: Label; action: () => void };
 type Arm = { shoulder: Node; elbow: Node; wrist: Node; upper: Node; forearm: Node; palm: Node };
-type Figure = { root: Node; body: Node; head: Node; arms: { lead: Arm; rear: Arm } };
+type Figure = { root: Node; body: Node; head: Node; cheek: Node; arms: { lead: Arm; rear: Arm } };
 const C = { bg: '#16232C', panel: '#293C48', ink: '#F5F4EF', gold: '#FFD166', blue: '#73C5D5', orange: '#E6A17A', danger: '#F47C7C' };
 const clamp = (n: number) => Math.max(0, Math.min(1, n));
 
@@ -70,6 +70,8 @@ export class SlapGame extends Component {
     private frameMaxDtMs: number | null = null;
     private frameRecentDtMs: number[] = [];
     private frameDiagnosticCanvas: HTMLElement | null = null;
+    private motionDiagnosticCanvas: HTMLElement | null = null;
+    private motionSamples: { nowMs: number; poses: [FighterPose, FighterPose]; actual: { leadPalm: Point; rearPalm: Point; cheek: Point; head: Point }[] }[] = [];
     private framePublishedWallMs = -Infinity;
     private diagnosticStart: 'slow' | 'fail-once' | null = null;
     private diagnosticStartFailed = false;
@@ -82,6 +84,7 @@ export class SlapGame extends Component {
             if (fps !== null && ['15', '30', '60'].includes(fps)) {
                 this.frameDiagnosticCanvas = document.getElementById('GameCanvas');
             }
+            if (query.get('diagnosticMotion') === '1') this.motionDiagnosticCanvas = document.getElementById('GameCanvas');
             const startup = query.get('diagnosticStart');
             if (startup === 'slow' || startup === 'fail-once') this.diagnosticStart = startup;
         }
@@ -180,6 +183,8 @@ export class SlapGame extends Component {
         this.shape(root, 'LeftLeg', 'box', [0.25, 0.55, 0.3], [-0.2, 0.27, 0], '#20313D');
         this.shape(root, 'RightLeg', 'box', [0.25, 0.55, 0.3], [0.2, 0.27, 0], '#20313D');
         const headPivot = new Node('HeadPivot'); body.addChild(headPivot); headPivot.setPosition(0, 1.8, 0);
+        const cheek = new Node('CheekAnchor'); body.addChild(cheek);
+        cheek.setPosition(...DEFAULT_ANCHORS[direction === 1 ? 0 : 1].cheek);
         const head = this.shape(headPivot, 'Head', 'sphere', [0.85, 0.9, 0.8], [0, 0, 0], '#F0CEAE');
         this.shape(head, 'EyeLeft', 'sphere', [0.08, 0.08, 0.04], [-0.15, 0.05, 0.47], C.bg);
         this.shape(head, 'EyeRight', 'sphere', [0.08, 0.08, 0.04], [0.15, 0.05, 0.47], C.bg);
@@ -193,7 +198,7 @@ export class SlapGame extends Component {
             const palm = this.shape(wrist, `${name}Palm`, 'sphere', [0.33, 0.42, 0.16], [0, 0, 0], '#F0CEAE');
             return { shoulder, elbow, wrist, upper, forearm, palm };
         };
-        return { root, body, head: headPivot, arms: { lead: makeArm('Lead'), rear: makeArm('Rear') } };
+        return { root, body, head: headPivot, cheek, arms: { lead: makeArm('Lead'), rear: makeArm('Rear') } };
     }
 
     private poseArm(arm: Arm, pose: ArmPose): void {
@@ -421,6 +426,7 @@ export class SlapGame extends Component {
                 this.session = new LocalSession({ sessionId: `local-${++this.round}`, mode: this.mode, practice, seed: 104729 });
                 this.clockMs = 0; this.sequence = 0;
                 this.motion.reset(this.session.snapshot().sessionId);
+                this.motionSamples = [];
                 this.seenEvents.clear(); this.trace = []; this.feedback = ''; this.feedbackUntil = 0;
                 if (this.hidden) { this.session.pause(); this.changePage('paused'); }
                 else this.changePage('battle');
@@ -469,6 +475,7 @@ export class SlapGame extends Component {
         this.bridge.cancelAll(); this.session?.pause(); this.session = null;
         this.seenEvents.clear(); this.trace = []; this.changePage('menu');
         this.motion.reset();
+        this.motionSamples = []; this.motionDiagnosticCanvas?.removeAttribute('data-slap-motion');
     }
     private hide(): void { this.hidden = true; this.pause(); }
     private show(): void { this.hidden = false; /* Only Continue resumes an active match. */ }
@@ -541,6 +548,17 @@ export class SlapGame extends Component {
             bar.fillColor = new Color(i === 0 ? C.blue : C.orange); bar.rect(-120, -8, 240 * fighter.hp / DEFAULT_RULES.maxHp, 16); bar.fill();
             this.poseFigure(this.figures[i], poses[i]);
         }
+        if (this.motionDiagnosticCanvas) {
+            const position = (node: Node): Point => [node.worldPosition.x, node.worldPosition.y, node.worldPosition.z];
+            this.motionSamples.push({ nowMs: state.nowMs, poses, actual: this.figures.map(f => ({
+                leadPalm: position(f.arms.lead.palm), rearPalm: position(f.arms.rear.palm), cheek: position(f.cheek), head: position(f.head),
+            })) });
+            if (this.motionSamples.length > 120) this.motionSamples.shift();
+            // Explicit diagnostic query only: read-only observations, never read into the simulation.
+            this.motionDiagnosticCanvas.setAttribute('data-slap-motion', JSON.stringify({
+                build: BUILD_ID, page: this.page, mode: this.mode, practice: this.practice, state, events: this.trace, samples: this.motionSamples,
+            }));
+        }
         const names: Record<string, string> = { idle: '', charging: '蓄力中', windup: '出掌中', recovery: '收招中', guard: '防御中', stunned: '受击中', counter: '精准挡住 · 准备反击', parried: '被挡住 · 反击将至', 'counter-recovery': '反击收招中' };
         const charge = me.chargeStartMs === null ? 0 : clamp((state.nowMs - me.chargeStartMs) / DEFAULT_RULES.fullChargeMs);
         const fullCharge = me.phase === 'charging' && charge >= 1;
@@ -568,6 +586,7 @@ export class SlapGame extends Component {
 
     onDestroy(): void {
         this.frameDiagnosticCanvas?.removeAttribute('data-slap-diagnostics');
+        this.motionDiagnosticCanvas?.removeAttribute('data-slap-motion');
         input.off(Input.EventType.TOUCH_START, this.touchStart, this);
         input.off(Input.EventType.TOUCH_END, this.touchEnd, this);
         input.off(Input.EventType.TOUCH_CANCEL, this.touchCancel, this);
