@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { spawnSync, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { ROOT, inside } from './bootstrap-game.mjs';
+import { checkPng, checkFbx } from './check-public-tree.mjs';
 
 export const ROLES = Object.freeze(['manager', 'veteran', 'rookie']);
 const FROZEN = 'abd8f3d38e0735c59e427cae2bca1c3436cb72aa1415e07f4b3a55407630711e';
@@ -32,7 +33,8 @@ export function safePath(base, target) {
       assert(!stat?.isSymbolicLink(), 'Symlink/junction rejected');
       if (stat) assert(inside(fs.realpathSync(root), fs.realpathSync(current)), 'Linked outside root');
     }
-    if (current === root) break;
+    if (path.relative(root, current) === '') break;
+    assert(path.dirname(current) !== current, 'Controlled root not reached');
   }
   return absolute;
 }
@@ -64,6 +66,8 @@ export function validateCast(sourceRoot = ROOT) {
       assert(record?.path === `${base}/${name}` && record.bytes === data.length && record.sha256 === sha(data), 'Output hash/size/path mismatch');
       if (name.endsWith('fbx')) assert(data.subarray(0, 23).equals(Buffer.from('Kaydara FBX Binary  \0\x1a\0', 'binary')) && data.readUInt32LE(23) === 7400, 'FBX signature/version mismatch');
       else assert(data.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10])) && data.readUInt32BE(16) === s.portrait.size && data.readUInt32BE(20) === s.portrait.size, 'PNG signature/dimensions mismatch');
+      const reject = category => { throw new Error(`Binary privacy policy: ${category}`); };
+      if (name.endsWith('fbx')) checkFbx(data, reject); else checkPng(data, reject);
     }
     const mesh = g.mesh, skin = g.convertedSkin, imports = g.imports;
     assert(mesh?.boneCount === 29 && new Set(mesh.boneNames).size === 29 && mesh.vertices > 0 && mesh.triangles > 0 && mesh.maxEvaluatedDisplacement > .2, 'Missing deform mesh/bones');
@@ -93,7 +97,7 @@ export function validateCast(sourceRoot = ROOT) {
   });
 }
 
-const toolNames = new Set(['bootstrap-game.mjs', 'build-config.mjs', 'build-game.ps1', 'check-game.mjs', 'configure-wechat.mjs', 'create-office-cast.py', 'serve.mjs', 'check.mjs', 'check-character-assets.mjs']);
+const toolNames = new Set(['bootstrap-game.mjs', 'build-config.mjs', 'build-game.ps1', 'check-game.mjs', 'check-public-tree.mjs', 'configure-wechat.mjs', 'create-office-cast.py', 'serve.mjs', 'check.mjs', 'check-character-assets.mjs']);
 const settingNames = new Set(['builder', 'cocos-service', 'device', 'engine', 'program', 'project']);
 export function isCopyInput(file) {
   if (file.split('/').some(p => p.startsWith('.') || !/^[A-Za-z0-9_.-]+$/.test(p))) return false;
@@ -116,7 +120,8 @@ export function createRebuildTarget(name = `rebuild-${new Date().toISOString().r
   return target;
 }
 function run(command, args, cwd, log) {
-  const result = spawnSync(command, args, { cwd, encoding: 'utf8', windowsHide: true, maxBuffer: 64 * 1024 * 1024 });
+  const result = spawnSync(command, args, { cwd, encoding: 'utf8', windowsHide: true, maxBuffer: 64 * 1024 * 1024,
+    env: { ...process.env, COCOS_INSTALL: 'E:/DevTools/CocosCreator/3.8.8', COCOS_ENGINE: 'E:/DevTools/CocosCreator/3.8.8/resources/resources/3d/engine' } });
   if (log) fs.writeFileSync(safePath(ROOT, log), (result.stdout || '') + (result.stderr || ''));
   if (result.error) throw result.error;
   return { exitCode: result.status, output: (result.stdout || '') + (result.stderr || '') };
@@ -149,15 +154,20 @@ export function checkProduction(sourceRoot = ROOT) {
   assert(new Set(roles.map(r => r.bindPoseSha256)).size === 3, 'Independent role bind poses unexpectedly shared');
   return { passed: true, roles, conversions, boundary: 'File/import identity only; actual runtime and visual adoption are separate.' };
 }
+export function assertStableImports(baseline, current) {
+  equal(current, baseline, 'Creator UUID/bone/clip identity drifted from copied source');
+}
 export function rebuild(name) {
   frozenBytes();
+  validateCast();
+  const importBaseline = Object.fromEntries(ROLES.map(role => [role, readAt(ROOT, `game/assets/resources/office-cast/${role}/manifest.json`).generated.imports]));
   const scan = run(process.execPath, [path.join(ROOT, 'tools/check-public-tree.mjs')], ROOT);
   assert.equal(scan.exitCode, 0, 'Public source scan failed before copy');
   const files = execFileSync('git', ['ls-files', '-z'], { cwd: ROOT, encoding: 'utf8' }).split('\0').filter(isCopyInput);
   // Validate the complete copy inventory before creating the unique destination.
   for (const file of files) assert(fs.lstatSync(safePath(ROOT, path.join(ROOT, file))).isFile(), 'Only regular copy inputs allowed');
   const target = createRebuildTarget(name), reportFile = path.join(target, 'rebuild-report.json');
-  const report = { schema: 1, startedAt: new Date().toISOString(), root: relative(target), frozenGeneratorSha256: FROZEN, copyInputs: [], cacheBefore: {}, generation: [], builds: [], runtimePassed: false };
+  const report = { schema: 1, startedAt: new Date().toISOString(), root: relative(target), frozenGeneratorSha256: FROZEN, importBaseline, copyInputs: [], cacheBefore: {}, generation: [], builds: [], runtimePassed: false };
   const save = () => fs.writeFileSync(reportFile, JSON.stringify(report, null, 2) + '\n');
   try {
     for (const file of files) {
@@ -177,7 +187,11 @@ export function rebuild(name) {
       const before = ROLES.map(role => sha(fs.readFileSync(path.join(target, `game/assets/resources/office-cast/${role}/manifest.json`))));
       for (const role of ROLES) frozen(target, role, '--sync-imports');
       const changed = ROLES.some((role, i) => sha(fs.readFileSync(path.join(target, `game/assets/resources/office-cast/${role}/manifest.json`))) !== before[i]);
-      if (result.exitCode === 0 && !changed) { report.identity = checkProduction(target); report.build = readAt(target, 'game/build/web-desktop/build-manifest.json'); report.technicalPassed = true; report.finishedAt = new Date().toISOString(); save(); return report; }
+      if (result.exitCode === 0 && !changed) {
+        for (const role of ROLES) assertStableImports(importBaseline[role], readAt(target, `game/assets/resources/office-cast/${role}/manifest.json`).generated.imports);
+        report.identity = checkProduction(target); report.binaryPrivacyPolicyPassed = true; report.stableImportIdentityPassed = true;
+        report.build = readAt(target, 'game/build/web-desktop/build-manifest.json'); report.technicalPassed = true; report.finishedAt = new Date().toISOString(); save(); return report;
+      }
     }
     throw new Error('Creator import identity did not stabilize after three builds');
   } catch (error) { report.error = error.message; save(); throw error; }

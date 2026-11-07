@@ -8,8 +8,6 @@ import assert from 'node:assert/strict';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const git = args => execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
-const staged = process.argv.includes('--staged');
-if (process.argv.slice(2).some(arg => !['--staged', '--self-test'].includes(arg))) throw new Error('Usage: node tools/check-public-tree.mjs [--staged | --self-test]');
 const allowed = /^(?:\.gitattributes|\.gitignore|README\.md|package\.json|tsconfig\.rules\.json|docs\/public\/[A-Za-z0-9-]+\.md|tests\/[A-Za-z0-9.-]+\.cjs|tools\/(?:create-office-cast\.py|[A-Za-z0-9.-]+\.(?:mjs|ps1))|game\/(?:assets|build-config|build-templates|settings)\/.+|game\/(?:package|tsconfig)\.json)$/;
 const blocked = /(?:^|\/)(?:\.planning|\.notion-pm-private|node_modules|library|temp|local|profiles|build|\.ssh)(?:\/|$)|(?:^|\/)(?:AGENTS\.md|project\.private\.config\.json|information\.json|verify-evidence\.mjs)$|\.(?:pem|key|p12|pfx|png|jpe?g|zip|gz)$/i;
 const detectors = [
@@ -54,7 +52,7 @@ function inflateExact(source, expected, label) {
   assert(result.buffer.length === expected, `${label} decoded size`);
   return result.buffer;
 }
-function checkPng(bytes, report = category => { throw new Error(`PNG sensitive ${category}`); }) {
+export function checkPng(bytes, report = category => { throw new Error(`PNG sensitive ${category}`); }) {
   assert(bytes.length <= 32 * 1024 * 1024, 'PNG file budget');
   assert(bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])), 'PNG signature');
   let p = 8, ended = false, data = false, width = 0, height = 0, idatEnded = false;
@@ -97,7 +95,7 @@ function checkPng(bytes, report = category => { throw new Error(`PNG sensitive $
   scanReadableBytes(pixels, report);
   return { width, height };
 }
-function checkFbx(bytes, report) {
+export function checkFbx(bytes, report) {
   assert(bytes.subarray(0, 23).equals(Buffer.from('Kaydara FBX Binary  \0\x1a\0', 'binary')), 'FBX signature');
   assert(bytes.readUInt32LE(23) === 7400 && bytes.length < 24 * 1024 * 1024, 'FBX version/size');
   let budget = 0, nodes = 0;
@@ -224,9 +222,13 @@ function selfTest() {
   check('service-token', () => { const found = []; scanText('ntn_' + 'x'.repeat(35), c => found.push(c)); assert(found.includes('service-token')); });
   console.log(JSON.stringify({ passed: true, scope: 'isolated-public-asset-fixtures', checks: passed.length, cases: passed }));
 }
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+const staged = process.argv.includes('--staged');
+if (process.argv.slice(2).some(arg => !['--staged', '--self-test'].includes(arg))) throw new Error('Usage: node tools/check-public-tree.mjs [--staged | --self-test]');
 if (process.argv.includes('--self-test')) { selfTest(); process.exit(0); }
 const files = git(['ls-files', '-z']).split('\0').filter(Boolean);
 const findings = audit(files, file => staged ? execFileSync('git', ['show', `:${file}`], { cwd: root, maxBuffer: 32 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'] }) : fs.readFileSync(path.join(root, file)));
 if (!files.length) findings.push({ file: '<index>', category: 'empty-tree' });
 console.log(JSON.stringify({ passed: findings.length === 0, scope: staged ? 'staged-public-tree' : 'tracked-working-tree', files: files.length, findings }, null, 2));
 if (findings.length) process.exitCode = 1;
+}

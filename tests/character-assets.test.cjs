@@ -59,6 +59,20 @@ test('rejects binary mismatch even when file exists', async t => {
   fs.appendFileSync(path.join(dir, 'game/assets/resources/office-cast/manager/character.fbx'), 'changed');
   assert.throws(() => validateCast(dir), /hash|size/i);
 });
+test('rejects forbidden PNG metadata even when its declared hash is updated', async t => {
+  const { validateCast } = await api, dir = fixture(t), file = path.join(dir, 'game/assets/resources/office-cast/manager/portrait.png');
+  const bytes = fs.readFileSync(file), chunk = Buffer.alloc(12); chunk.write('tEXt', 4);
+  // The forbidden type is rejected before its CRC/content can be accepted.
+  const altered = Buffer.concat([bytes.subarray(0, 33), chunk, bytes.subarray(33)]); fs.writeFileSync(file, altered);
+  mutate(dir, 'manager', m => { const record = m.generated.outputs['portrait.png']; record.bytes = altered.length; record.sha256 = crypto.createHash('sha256').update(altered).digest('hex'); });
+  assert.throws(() => validateCast(dir), /metadata\/chunk rejected/);
+});
+test('import synchronization cannot absorb a changed stable UUID', async () => {
+  const { assertStableImports } = await api;
+  const baseline = { modelUuid: 'stable', clipUuids: { idle: 'stable@idle' } };
+  assert.doesNotThrow(() => assertStableImports(baseline, structuredClone(baseline)));
+  assert.throws(() => assertStableImports(baseline, { ...baseline, modelUuid: 'changed' }), /identity drifted/);
+});
 test('copy whitelist excludes generated binaries, private identity, caches and portable', async () => {
   const { isCopyInput } = await api;
   for (const file of ['game/assets/scripts/SlapGame.ts', 'game/assets/resources/office-cast/manager/manifest.json', 'game/assets/resources/office-cast/manager/character.fbx.meta', 'tools/build-game.ps1']) assert.equal(isCopyInput(file), true, file);
