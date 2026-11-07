@@ -10,6 +10,8 @@
     "gfx-webgl",
     "gfx-webgl2",
     "3d",
+    "animation",
+    "skeletal-animation",
     "2d",
     "ui",
     "graphics",

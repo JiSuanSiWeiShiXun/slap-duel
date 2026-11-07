@@ -1,0 +1,4 @@
+.gitattributes text eol=lf
+tools/create-office-cast.py text eol=lf
+game/assets/resources/office-cast/*/character.fbx -text
+game/assets/resources/office-cast/*/portrait.png -text

@@ -2,6 +2,8 @@ import {
     _decorator, Component, Node, Camera, Canvas, UITransform, Layers, Color, Vec3,
     MeshRenderer, Material, Mesh, primitives, utils, Label, Graphics, Quat,
     input, Input, EventTouch, game, Game, view, screen, ResolutionPolicy, sys, DirectionalLight, profiler, director, Director,
+    resources, JsonAsset, Prefab, instantiate, assetManager, Asset, SkeletalAnimation, SkinnedMeshRenderer,
+    AnimationState, Sprite, SpriteFrame, Texture2D,
 } from 'cc';
 import { ActionKind, AttackMode, BattleState, BattleEvent, DEFAULT_RULES } from './core/Battle';
 import { LocalSession } from './session/LocalSession';
@@ -14,10 +16,16 @@ const { ccclass } = _decorator;
 type Page = 'menu' | 'practice' | 'loading' | 'battle' | 'paused' | 'confirm' | 'result' | 'error';
 type Practice = 'normal' | 'hit' | 'block' | 'parry';
 type Button = { transform: UITransform; label: Label; action: () => void };
-type Arm = { shoulder: Node; elbow: Node; wrist: Node; upper: Node; forearm: Node; palm: Node };
-type Figure = { root: Node; body: Node; head: Node; cheek: Node; arms: { lead: Arm; rear: Arm } };
+type RoleId = 'manager' | 'veteran' | 'rookie';
+type CastManifest = { schemaVersion: number; source: { roleId: RoleId; displayName: string;
+    facets: { positive: string; negative: string }; appearance: { cloth: string; outfit: string }; proportions: { height: number; arm: number } };
+    generated: { sourceHash: string; imports: { prefabUuid: string; skeletonUuid: string; portraitTextureUuid: string;
+        bonePaths: Record<string, string>; clipUuids: Record<string, string> } } };
+type SkinnedActor = { root: Node; animation: SkeletalAnimation; bones: Record<string, Node>;
+    renderers: SkinnedMeshRenderer[]; manifest: CastManifest; side: 0 | 1;
+    states: Map<string, AnimationState>; clip: string; palm: { lead: Vec3; rear: Vec3 }; cheek: Vec3 };
 type ContactFrame = {
-    stage: 'guard-raise' | 'parry-catch' | 'counter-rise' | 'counter-hit'; actorId: number;
+    stage: 'guard-raise' | 'parry-catch' | 'counter-dip' | 'counter-rise' | 'counter-hit'; actorId: number;
     nowMs: number; hp: number[]; phases: string[]; events: BattleEvent[];
     width: number; height: number; image?: string; error?: string;
 };
@@ -56,7 +64,18 @@ export class SlapGame extends Component {
     private chargeBar: Graphics | null = null;
     private resultLabel: Label | null = null;
     private timerLabel: Label | null = null;
-    private figures: Figure[] = [];
+    private actors: SkinnedActor[] = [];
+    private cast: CastManifest[] = [];
+    private selectedRole: RoleId = 'manager';
+    private opponentRole: RoleId = 'manager';
+    private roleTextures = new Map<RoleId, Texture2D>();
+    private loadingAssets = new Map<string, Promise<Asset>>();
+    private portraitFrames: SpriteFrame[] = [];
+    private loadGeneration = 0;
+    private castError = '';
+    private pendingSkinState: BattleState | null = null;
+    private pendingPoses: [FighterPose, FighterPose] | null = null;
+    private newSkinSample = false;
     private materials: Material[] = [];
     private meshes: Mesh[] = [];
     private seenEvents = new Set<string>();
@@ -105,12 +124,13 @@ export class SlapGame extends Component {
         game.on(Game.EVENT_SHOW, this.show, this);
         view.on('canvas-resize', this.resize, this);
         this.ready = true;
+        this.loadCast();
         if (this.motionDiagnosticCanvas) director.on(Director.EVENT_AFTER_DRAW, this.captureContactFrame, this);
         // Read-only diagnostics help tie runtime evidence to this exact build.
         (globalThis as unknown as Record<string, unknown>).__SLAP_DEBUG__ = {
             build: BUILD_ID,
             inspect: () => ({ page: this.page, mode: this.mode, practice: this.practice,
-                state: this.session?.snapshot() ?? null, events: this.trace.map(e => ({ ...e })),
+                state: this.session?.snapshot() ?? null, events: this.trace.map(e => ({ ...e })), cast: this.skinEvidence(),
                 frames: this.frameDiagnostics() }),
         };
     }
@@ -125,14 +145,15 @@ export class SlapGame extends Component {
 
     /** Capture the engine's actual canvas after drawing, only with the explicit diagnostic query. */
     private captureContactFrame(): void {
-        if (!this.motionDiagnosticCanvas || this.page !== 'battle' || this.contactFrames.length >= 4 || !this.motionFrameState) return;
+        if (!this.motionDiagnosticCanvas || this.page !== 'battle' || this.contactFrames.length >= 5 || !this.motionFrameState) return;
         const state = this.motionFrameState;
         let stage: ContactFrame['stage'] | null = null, actorId = -1;
         for (let i = 0; i < 2; i++) {
             const f = state.fighters[i], age = state.nowMs - f.phaseStartMs;
             if (f.phase === 'counter-recovery') { stage = 'counter-hit'; actorId = i; break; }
             if (f.phase === 'counter') {
-                stage = age >= DEFAULT_RULES.counterWindupMs * 0.65 ? 'counter-rise' : 'parry-catch'; actorId = i; break;
+                stage = age >= DEFAULT_RULES.counterWindupMs * 0.65 ? 'counter-rise'
+                    : age >= DEFAULT_RULES.counterWindupMs * .25 ? 'counter-dip' : 'parry-catch'; actorId = i; break;
             }
             if (f.phase === 'guard' && age > 0 && stage === null) { stage = 'guard-raise'; actorId = i; }
         }
@@ -148,7 +169,7 @@ export class SlapGame extends Component {
             frame.image = data;
         } catch (error) { frame.error = error instanceof Error ? error.message : 'Canvas readback failed'; }
         this.contactFrames.push(frame);
-        // Encode at most four times per session. The images never feed back into gameplay.
+        // Encode at most five times per session. The images never feed back into gameplay.
         canvas.setAttribute('data-slap-contact-frames', JSON.stringify({ build: BUILD_ID, sessionId: state.sessionId,
             mode: this.mode, practice: this.practice, source: 'Cocos Director.EVENT_AFTER_DRAW canvas.toDataURL', frames: this.contactFrames }));
     }
@@ -177,7 +198,7 @@ export class SlapGame extends Component {
         this.node.addChild(this.world);
         const cameraNode = new Node('WorldCamera');
         this.world.addChild(cameraNode);
-        cameraNode.setPosition(0, 2.5, 9.8);
+        cameraNode.setPosition(0, 2.55, 7.2);
         cameraNode.lookAt(new Vec3(0, 1.1, 0));
         const camera = cameraNode.addComponent(Camera);
         this.worldCamera = camera;
@@ -196,7 +217,7 @@ export class SlapGame extends Component {
         lightNode.addComponent(DirectionalLight);
         this.shape(this.world, 'Stage', 'box', [6, 0.2, 3], [0, -0.15, 0], '#344D5B');
         this.shape(this.world, 'CenterStripe', 'box', [0.045, 0.012, 2.6], [0, -0.038, 0], C.gold);
-        this.figures = [this.figure(-1.25, 1, C.blue), this.figure(1.25, -1, C.orange)];
+        // Characters are imported skinned assets. Missing resources use the error path.
     }
 
     private shape(parent: Node, name: string, kind: 'box' | 'sphere', scale: number[], pos: number[], color: string): Node {
@@ -217,57 +238,188 @@ export class SlapGame extends Component {
         return node;
     }
 
-    private figure(x: number, direction: number, color: string): Figure {
-        const root = new Node(direction === 1 ? 'Player' : 'Bot');
-        this.world.addChild(root);
-        root.setPosition(x, 0, 0);
-        const body = new Node('TorsoPivot'); root.addChild(body);
-        this.shape(body, 'Torso', 'box', [0.7, 0.85, 0.48], [0, 0.95, 0], color);
-        this.shape(root, 'LeftLeg', 'box', [0.25, 0.55, 0.3], [-0.2, 0.27, 0], '#20313D');
-        this.shape(root, 'RightLeg', 'box', [0.25, 0.55, 0.3], [0.2, 0.27, 0], '#20313D');
-        const headPivot = new Node('HeadPivot'); body.addChild(headPivot); headPivot.setPosition(0, 1.8, 0);
-        const cheek = new Node('CheekAnchor'); body.addChild(cheek);
-        cheek.setPosition(...DEFAULT_ANCHORS[direction === 1 ? 0 : 1].cheek);
-        const head = this.shape(headPivot, 'Head', 'sphere', [0.85, 0.9, 0.8], [0, 0, 0], '#F0CEAE');
-        this.shape(head, 'EyeLeft', 'sphere', [0.08, 0.08, 0.04], [-0.15, 0.05, 0.47], C.bg);
-        this.shape(head, 'EyeRight', 'sphere', [0.08, 0.08, 0.04], [0.15, 0.05, 0.47], C.bg);
-        this.shape(head, 'Mouth', 'box', [0.2, 0.035, 0.025], [0, -0.15, 0.48], C.bg);
-        const makeArm = (name: string): Arm => {
-            const shoulder = new Node(`${name}Shoulder`); body.addChild(shoulder);
-            const elbow = new Node(`${name}Elbow`); shoulder.addChild(elbow);
-            const wrist = new Node(`${name}Wrist`); elbow.addChild(wrist);
-            const upper = this.shape(shoulder, `${name}UpperArm`, 'box', [0.14, 0.4, 0.14], [0, 0, 0], color);
-            const forearm = this.shape(elbow, `${name}Forearm`, 'box', [0.12, 0.4, 0.12], [0, 0, 0], '#F0CEAE');
-            const palm = this.shape(wrist, `${name}Palm`, 'sphere', [0.33, 0.42, 0.16], [0, 0, 0], '#F0CEAE');
-            return { shoulder, elbow, wrist, upper, forearm, palm };
-        };
-        return { root, body, head: headPivot, cheek, arms: { lead: makeArm('Lead'), rear: makeArm('Rear') } };
+    private loadAsset<T extends Asset>(uuid: string): Promise<T> {
+        if (!uuid || !/^[a-zA-Z0-9@-]+$/.test(uuid)) return Promise.reject(new Error('Missing imported character reference'));
+        let promise = this.loadingAssets.get(uuid);
+        if (!promise) {
+            promise = new Promise<Asset>((resolve, reject) => assetManager.loadAny<Asset>(uuid, (error, value) => error ? reject(error) : resolve(value)));
+            this.loadingAssets.set(uuid, promise);
+            promise.catch(() => this.loadingAssets.delete(uuid));
+        }
+        return promise as Promise<T>;
     }
 
-    private poseArm(arm: Arm, pose: ArmPose): void {
-        arm.shoulder.setWorldPosition(...pose.shoulder);
-        arm.elbow.setWorldPosition(...pose.elbow);
-        arm.wrist.setWorldPosition(...pose.wrist);
-        const segment = (node: Node, a: Point, b: Point, width: number) => {
-            const delta = new Vec3(b[0] - a[0], b[1] - a[1], b[2] - a[2]);
-            const length = delta.length();
-            node.setWorldPosition((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2);
-            node.setScale(width, Math.max(0.001, length), width);
-            node.setWorldRotation(Quat.rotationTo(new Quat(), Vec3.UP, delta.normalize()));
-        };
-        segment(arm.upper, pose.shoulder, pose.elbow, 0.14);
-        segment(arm.forearm, pose.elbow, pose.wrist, 0.12);
-        arm.palm.setWorldPosition(...pose.palm);
-        arm.palm.setWorldRotationFromEuler(0, pose.palmYaw, 0);
+    private loadCast(): void {
+        resources.loadDir('office-cast', JsonAsset, async (error, assets) => {
+            if (!this.isValid) return;
+            try {
+                if (error) throw error;
+                const roles = ['manager', 'veteran', 'rookie'];
+                this.cast = assets.map(asset => asset.json as CastManifest).filter(m => m.schemaVersion === 1 && roles.includes(m.source?.roleId));
+                if (!this.cast.length) throw new Error('No usable office character manifest');
+                for (const manifest of this.cast) {
+                    const refs = manifest.generated?.imports;
+                    if (!refs?.prefabUuid || !refs.skeletonUuid || !refs.portraitTextureUuid || Object.keys(refs.bonePaths).length !== 29) throw new Error('Character import references incomplete');
+                    const texture = await this.loadAsset<Texture2D>(refs.portraitTextureUuid);
+                    if (!this.isValid) return;
+                    this.roleTextures.set(manifest.source.roleId, texture);
+                }
+                this.cast.sort((a, b) => roles.indexOf(a.source.roleId) - roles.indexOf(b.source.roleId));
+                this.castError = '';
+            } catch (failure) { this.cast = []; this.castError = failure instanceof Error ? failure.message : 'Character loading failed'; console.error(this.castError); }
+            if (this.page === 'menu') this.renderPage();
+        });
     }
 
-    private poseFigure(figure: Figure, pose: FighterPose): void {
-        figure.body.setWorldPosition(...pose.body);
-        figure.body.setRotationFromEuler(0, pose.bodyYaw, pose.bodyRoll);
-        figure.head.setWorldPosition(...pose.head);
-        figure.head.setRotationFromEuler(0, 0, pose.headRoll);
-        this.poseArm(figure.arms.lead, pose.arms.lead);
-        this.poseArm(figure.arms.rear, pose.arms.rear);
+    private clearActors(): void {
+        this.pendingSkinState = null; this.pendingPoses = null;
+        for (const actor of this.actors) { actor.animation.stop(); actor.root.destroy(); }
+        this.actors = [];
+    }
+
+    private async prepareActors(token: number): Promise<void> {
+        const selected = [this.selectedRole, this.opponentRole];
+        const manifests = selected.map(role => this.cast.find(m => m.source.roleId === role));
+        if (manifests.some(m => !m)) throw new Error(this.castError || 'Character assets are still loading');
+        const templates = await Promise.all(manifests.map(m => this.loadAsset<Prefab>(m!.generated.imports.prefabUuid)));
+        if (!this.isValid || token !== this.loadGeneration) return;
+        this.clearActors();
+        try {
+            for (const side of [0, 1] as const) {
+                const manifest = manifests[side]!, root = instantiate(templates[side]);
+                // Configure real-time skinning before onLoad creates any baked states.
+                root.active = false;
+                this.world.addChild(root); root.setPosition(side === 0 ? -.55 : .55, 0, 0);
+                root.setRotationFromEuler(0, side === 0 ? 25 : -25, 0);
+                const animation = root.getComponent(SkeletalAnimation) || root.getComponentInChildren(SkeletalAnimation);
+                const renderers = root.getComponentsInChildren(SkinnedMeshRenderer);
+                if (!animation || !renderers.length || renderers.some(r => !r.mesh || !r.skeleton || r.skeleton.joints.length !== 29)) { root.destroy(); throw new Error('Character has no valid 29-joint skin'); }
+                animation.useBakedAnimation = false;
+                root.active = true;
+                const bones: Record<string, Node> = {};
+                for (const [name, path] of Object.entries(manifest.generated.imports.bonePaths)) {
+                    const bone = root.getChildByPath(path); if (!bone) { root.destroy(); throw new Error(`Character bone missing: ${name}`); } bones[name] = bone;
+                }
+                const states = new Map<string, AnimationState>();
+                for (const name of Object.keys(manifest.generated.imports.clipUuids)) {
+                    const state = animation.getState(name);
+                    if (!state) { root.destroy(); throw new Error(`Character clip missing: ${name}`); }
+                    states.set(name, state);
+                }
+                if (!states.has('counter') || !states.has('idle')) { root.destroy(); throw new Error('Combat animation import incomplete'); }
+                for (const renderer of renderers) {
+                    renderer.node.layer = Layers.Enum.DEFAULT;
+                    const material = renderer.getMaterialInstance(manifest.source.appearance.outfit === 'shirt' ? 2 : 1);
+                    material?.setProperty('mainColor', new Color(side === 0 ? C.blue : C.orange));
+                }
+                this.actors.push({ root, animation, bones, renderers, manifest, side, states, clip: '',
+                    palm: { lead: new Vec3(), rear: new Vec3() }, cheek: new Vec3() });
+            }
+        } catch (error) { this.clearActors(); throw error; }
+    }
+
+    private sampleActors(state: BattleState): void {
+        this.newSkinSample = true;
+        for (const actor of this.actors) {
+            const f = state.fighters[actor.side], age = state.nowMs - f.phaseStartMs;
+            let name = 'idle', progress = (state.nowMs % 2000) / 2000;
+            if (f.phase === 'charging') { name = 'charge'; progress = (age % 1200) / 1200; }
+            else if (f.phase === 'windup') { name = this.trace.some(e => e.kind === 'attack-start' && e.actorId === actor.side && e.atMs === f.phaseStartMs && (e.damage ?? 1) > 1) ? 'attack-heavy' : 'attack-light'; progress = age / DEFAULT_RULES.windupMs; }
+            else if (f.phase === 'guard' || f.phase === 'parried') { name = 'guard'; progress = Math.min(1, age / 60); }
+            else if (f.phase === 'counter') { name = 'counter'; progress = age / DEFAULT_RULES.counterWindupMs; }
+            else if (f.phase === 'counter-recovery') { name = 'counter-recovery'; progress = age / DEFAULT_RULES.counterRecoveryMs; }
+            else if (f.phase === 'recovery') { name = 'recovery'; progress = age / DEFAULT_RULES.recoveryMs; }
+            else if (f.phase === 'stunned') { name = 'hit'; progress = age / DEFAULT_RULES.stunMs; }
+            if (state.result !== null) { name = f.hp > 0 ? 'victory' : 'defeat'; progress = 1; }
+            const animationState = actor.states.get(name);
+            if (!animationState) throw new Error(`Required combat clip not loaded: ${name}`);
+            if (actor.clip !== name) { actor.animation.stop(); actor.animation.play(name); animationState.pause(); actor.clip = name; }
+            animationState.setTime(clamp(progress) * animationState.duration); animationState.sample();
+            const facing = actor.side === 0 ? 1 : -1;
+            const lunge = f.phase === 'counter' ? .34 * clamp(age / DEFAULT_RULES.counterWindupMs)
+                : f.phase === 'counter-recovery' ? .34 * (1 - clamp(age / DEFAULT_RULES.counterRecoveryMs)) : 0;
+            actor.root.setPosition((actor.side === 0 ? -.55 : .55) + facing * lunge, 0, 0);
+        }
+    }
+
+    private skinEvidence() {
+        const point = (v: Readonly<Vec3>) => [v.x, v.y, v.z];
+        return this.actors.map(actor => ({ roleId: actor.manifest.source.roleId, sourceHash: actor.manifest.generated.sourceHash,
+            prefabUuid: actor.manifest.generated.imports.prefabUuid, skeletonUuid: actor.manifest.generated.imports.skeletonUuid,
+            skinnedRenderers: actor.renderers.length, joints: Object.keys(actor.bones).length, clip: actor.clip,
+            useBakedAnimation: actor.animation.useBakedAnimation, sampledTime: actor.states.get(actor.clip)?.time ?? null,
+            actual: { leadPalm: point(actor.palm.lead), rearPalm: point(actor.palm.rear), cheek: point(actor.cheek),
+                head: point(actor.bones.Head.worldPosition), pelvis: point(actor.bones.Pelvis.worldPosition), root: point(actor.root.worldPosition) } }));
+    }
+
+    /** Solve on deform bones after animation blending; never changes rule state. */
+    private solveArm(actor: SkinnedActor, hand: 'lead' | 'rear', palmTarget: Vec3): void {
+        const side = hand === 'lead' ? actor.side === 0 ? 'L' : 'R' : actor.side === 0 ? 'R' : 'L';
+        const upper = actor.bones[`UpperArm.${side}`], fore = actor.bones[`Forearm.${side}`], wrist = actor.bones[`Hand.${side}`];
+        const shoulder = upper.worldPosition.clone(), forePoint = fore.worldPosition.clone(), wristPoint = wrist.worldPosition.clone();
+        const a = Vec3.distance(shoulder, forePoint), b = Vec3.distance(forePoint, wristPoint);
+        // Palm centre lies .095m beyond the wrist; open fingers point upwards.
+        const target = new Vec3(palmTarget.x, palmTarget.y - .095 * actor.manifest.source.proportions.height, palmTarget.z);
+        const direction = Vec3.subtract(new Vec3(), target, shoulder);
+        const distance = Math.max(.025, Math.min(direction.length(), a + b - .001)); direction.normalize();
+        const along = (a * a - b * b + distance * distance) / (2 * distance);
+        const bend = new Vec3(0, -1, -.15);
+        Vec3.subtract(bend, bend, Vec3.multiplyScalar(new Vec3(), direction, Vec3.dot(bend, direction))); bend.normalize();
+        const elbow = Vec3.add(new Vec3(), shoulder, Vec3.multiplyScalar(new Vec3(), direction, along));
+        Vec3.add(elbow, elbow, Vec3.multiplyScalar(new Vec3(), bend, Math.sqrt(Math.max(0, a * a - along * along))));
+        const endpoint = Vec3.add(new Vec3(), shoulder, Vec3.multiplyScalar(new Vec3(), direction, distance));
+        const orient = (bone: Node, end: Vec3) => {
+            const up = Vec3.subtract(new Vec3(), end, bone.worldPosition).normalize();
+            // Imported bind axes: local Y runs down the arm; local +/-X is the palm normal.
+            const normal = new Vec3(0, 0, side === 'L' ? 1 : -1);
+            const right = Vec3.subtract(new Vec3(), normal, Vec3.multiplyScalar(new Vec3(), up, Vec3.dot(normal, up))).normalize();
+            const front = Vec3.cross(new Vec3(), right, up).normalize();
+            bone.setWorldRotation(Quat.fromAxes(new Quat(), right, up, front));
+        };
+        orient(upper, elbow); orient(fore, endpoint);
+        // Keep a visible palm face towards the camera instead of flipping/negative scale.
+        wrist.setWorldRotation(Quat.fromAxes(new Quat(), new Vec3(0, 0, side === 'L' ? 1 : -1), Vec3.UP, new Vec3(side === 'L' ? -1 : 1, 0, 0)));
+        Vec3.transformMat4(actor.palm[hand], new Vec3(0, .00095, 0), wrist.worldMatrix);
+    }
+
+    lateUpdate(): void {
+        const state = this.pendingSkinState, poses = this.pendingPoses;
+        if (!state || !poses || this.actors.length !== 2) return;
+        if (this.newSkinSample) {
+            // Reflect the source body's turn for the opposite station without negative scale.
+            const chest = this.actors[1].bones.Chest, q = chest.rotation;
+            chest.setRotation(new Quat(q.x, -q.y, -q.z, q.w));
+            this.newSkinSample = false;
+        }
+        for (const actor of this.actors) {
+            const facing = actor.side === 0 ? 1 : -1;
+            Vec3.transformMat4(actor.cheek, new Vec3(facing * .0018, .0022, .0016), actor.bones.Head.worldMatrix);
+        }
+        const guarded = this.actors.map(actor => new Vec3(actor.cheek.x + (actor.side === 0 ? .10 : -.10), actor.cheek.y - .025, actor.cheek.z + .07));
+        for (const actor of this.actors) {
+            const f = state.fighters[actor.side], other = this.actors[1 - actor.side], age = state.nowMs - f.phaseStartMs;
+            const lead = new Vec3(...poses[actor.side].arms.lead.palm), rear = new Vec3(...poses[actor.side].arms.rear.palm);
+            if (f.phase === 'guard' || f.phase === 'counter' || f.phase === 'counter-recovery') lead.set(guarded[actor.side]);
+            if (f.phase === 'parried') lead.set(guarded[1 - actor.side]);
+            if (f.phase === 'windup') {
+                const target = state.fighters[other.side].phase === 'guard' ? guarded[other.side] : other.cheek;
+                const u = clamp((age / DEFAULT_RULES.windupMs - .65) / .35);
+                Vec3.lerp(lead, new Vec3((actor.side === 0 ? -.55 : .55) + (actor.side === 0 ? .25 : -.25), 1.55, .15), target, u);
+            }
+            if (f.phase === 'counter') Vec3.lerp(rear, new Vec3(actor.root.worldPosition.x + (actor.side === 0 ? -.35 : .35), 1.65, .18), other.cheek, clamp((age / DEFAULT_RULES.counterWindupMs - .32) / .68));
+            if (f.phase === 'counter-recovery') Vec3.lerp(rear, other.cheek, new Vec3((actor.side === 0 ? -.55 : .55) + (actor.side === 0 ? -.35 : .35), 1.1, .25), clamp(age / DEFAULT_RULES.counterRecoveryMs));
+            if (f.phase === 'idle' || f.phase === 'charging' || f.phase === 'stunned' || state.result !== null) {
+                const handNames = actor.side === 0 ? ['L', 'R'] : ['R', 'L'];
+                for (const [index, hand] of (['lead', 'rear'] as const).entries()) Vec3.transformMat4(actor.palm[hand], new Vec3(0, .00095, 0), actor.bones[`Hand.${handNames[index]}`].worldMatrix);
+            } else { this.solveArm(actor, 'lead', lead); this.solveArm(actor, 'rear', rear); }
+        }
+        if (this.motionDiagnosticCanvas && this.page === 'battle') {
+            const point = (v: Vec3): Point => [v.x, v.y, v.z];
+            this.motionSamples.push({ nowMs: state.nowMs, poses, actual: this.actors.map(a => ({ leadPalm: point(a.palm.lead), rearPalm: point(a.palm.rear), cheek: point(a.cheek), head: point(a.bones.Head.worldPosition) })) });
+            if (this.motionSamples.length > 120) this.motionSamples.shift();
+            this.motionDiagnosticCanvas.setAttribute('data-slap-motion', JSON.stringify({ build: BUILD_ID, page: this.page, mode: this.mode, practice: this.practice,
+                state, events: this.trace, samples: this.motionSamples, cast: this.skinEvidence() }));
+        }
     }
 
     private buildCanvas(): void {
@@ -366,6 +518,8 @@ export class SlapGame extends Component {
 
     private renderPage(): void {
         for (const child of [...this.ui.children]) child.destroy();
+        for (const frame of this.portraitFrames) frame.destroy();
+        this.portraitFrames = [];
         this.buttons = [];
         this.attack = this.guard = null;
         this.attackPanel = this.guardPanel = null;
@@ -379,7 +533,26 @@ export class SlapGame extends Component {
             this.text('掌上对决', 0, top, 660, 56);
             this.text('选择你的出掌方式', 0, top - (this.landscape ? 80 : 90), 640, 40, C.ink, 56);
             this.text(`轻击伤害${DEFAULT_RULES.baseDamage}；按住${DEFAULT_RULES.fullChargeMs / 1000}秒蓄满伤害${DEFAULT_RULES.chargedDamage}。\n满蓄力后松手出掌。`, 0, top - (this.landscape ? 150 : 180), 640, 24, C.ink, 72);
-            const y = this.landscape ? 0 : 80;
+            const roleX = this.landscape ? -470 : 80, roleY = this.landscape ? 50 : 222;
+            const role = this.cast.find(m => m.source.roleId === this.selectedRole);
+            const texture = this.roleTextures.get(this.selectedRole);
+            if (texture) {
+                const portrait = this.uiNode('CharacterPortrait', this.landscape ? -470 : -230, this.landscape ? 135 : 208, 144, 144);
+                const sprite = portrait.addComponent(Sprite), frame = new SpriteFrame(); frame.texture = texture;
+                sprite.spriteFrame = frame; sprite.sizeMode = Sprite.SizeMode.CUSTOM; this.portraitFrames.push(frame);
+            }
+            const cycle = (opponent: boolean) => {
+                if (!this.cast.length) return;
+                const id = opponent ? this.opponentRole : this.selectedRole;
+                const next = this.cast[(this.cast.findIndex(m => m.source.roleId === id) + 1) % this.cast.length].source.roleId;
+                if (opponent) this.opponentRole = next; else this.selectedRole = next;
+                this.renderPage();
+            };
+            this.button(role ? `你：${role.source.displayName} · 换人` : this.castError ? '人设载入失败 · 重试' : '正在载入人设…', roleX, roleY, this.landscape ? 240 : 390,
+                () => this.castError ? this.loadCast() : cycle(false), false, 64);
+            const opponent = this.cast.find(m => m.source.roleId === this.opponentRole);
+            this.button(`对手：${opponent?.source.displayName ?? '准备中'} · 换人`, roleX, roleY - 80, this.landscape ? 240 : 390, () => cycle(true), false, 64);
+            const y = this.landscape ? 0 : 40;
             this.button(`蓄力出掌${this.mode === 'charge' ? ' · 已选' : ''}`, -168, y, 312, () => { this.mode = 'charge'; this.renderPage(); }, false, 96, this.mode === 'charge' ? 'selected' : 'normal');
             this.button(`点击出掌${this.mode === 'tap' ? ' · 已选' : ''}`, 168, y, 312, () => { this.mode = 'tap'; this.renderPage(); }, false, 96, this.mode === 'tap' ? 'selected' : 'normal');
             this.button('开始对战', 0, y - 128, 520, () => this.begin('normal'), true);
@@ -394,6 +567,7 @@ export class SlapGame extends Component {
             this.button('返回选择', this.landscape ? -480 : 0, this.landscape ? -260 : y - 352, this.landscape ? 240 : 520, () => this.changePage('menu'));
         } else if (this.page === 'loading') {
             this.text('正在准备对战…', 0, 0, 640, 40);
+            this.button('返回选择', 0, -120, 520, () => this.backToMenu());
         } else if (this.page === 'error') {
             this.text('对战未能启动', 0, 100, 640, 40);
             this.text('请返回选择后重试。', 0, 20, 640, 32);
@@ -446,7 +620,7 @@ export class SlapGame extends Component {
         this.resultLabel = this.text('', 0, this.landscape ? -110 : -240, this.landscape ? 580 : 640, 40);
         if (this.practice !== 'normal') {
             const hints = { hit: `命中练习：轻击伤害${DEFAULT_RULES.baseDamage}，蓄满伤害${DEFAULT_RULES.chargedDamage}`, block: '格挡练习：来掌前提前按防御', parry: '精准反击练习：贴近命中再按防御' };
-            this.text(hints[this.practice], 0, top - 160, this.landscape ? 580 : 640, 24, C.ink, 48);
+            this.text(hints[this.practice], 0, this.landscape ? top - 116 : top - 160, this.landscape ? 580 : 640, 24, C.ink, 48);
             this.button('重试练习', this.landscape ? 470 : 0, top - (this.landscape ? 116 : 256), 260, () => this.begin(this.practice));
         } else this.text('提前按可格挡，贴近命中时按可反击', 0, this.landscape ? -190 : -312, this.landscape ? 580 : 640, 24, C.ink, 48);
         if (this.session) this.drawState(this.session.snapshot());
@@ -457,15 +631,19 @@ export class SlapGame extends Component {
         this.bridge.cancelAll();
         this.session?.pause();
         this.practice = practice;
+        const token = ++this.loadGeneration;
         this.changePage('loading');
-        this.scheduleOnce(() => {
+        this.scheduleOnce(async () => {
             try {
+                if (!this.isValid || token !== this.loadGeneration) return;
                 // Explicit Web-only fault injection exercises the real catch and
                 // retry path without manufacturing a battle or its result.
                 if (this.diagnosticStart === 'fail-once' && !this.diagnosticStartFailed) {
                     this.diagnosticStartFailed = true;
                     throw new Error('Diagnostic one-time session initialization failure');
                 }
+                await this.prepareActors(token);
+                if (!this.isValid || token !== this.loadGeneration) return;
                 this.session = new LocalSession({ sessionId: `local-${++this.round}`, mode: this.mode, practice, seed: 104729 });
                 this.clockMs = 0; this.sequence = 0;
                 this.motion.reset(this.session.snapshot().sessionId);
@@ -474,7 +652,7 @@ export class SlapGame extends Component {
                 this.seenEvents.clear(); this.trace = []; this.feedback = ''; this.feedbackUntil = 0;
                 if (this.hidden) { this.session.pause(); this.changePage('paused'); }
                 else this.changePage('battle');
-            } catch (error) { console.error('Slap game session initialization failed', error); this.changePage('error'); }
+            } catch (error) { if (this.isValid && token === this.loadGeneration) { this.clearActors(); console.error('Slap game session initialization failed', error); this.changePage('error'); } }
         }, this.diagnosticStart === 'slow' ? 2 : 0.05);
     }
 
@@ -516,7 +694,9 @@ export class SlapGame extends Component {
         this.changePage('battle');
     }
     private backToMenu(): void {
+        ++this.loadGeneration;
         this.bridge.cancelAll(); this.session?.pause(); this.session = null;
+        this.clearActors();
         this.seenEvents.clear(); this.trace = []; this.changePage('menu');
         this.motion.reset();
         this.motionSamples = []; this.motionDiagnosticCanvas?.removeAttribute('data-slap-motion');
@@ -584,25 +764,18 @@ export class SlapGame extends Component {
             this.guardAvailable = guardAvailable;
             this.paintControl(this.guardPanel!, guardAvailable ? C.panel : '#1D2C35');
         }
-        const poses = this.motion.sample(state);
+        const poses = this.motion.sample(state, state.nowMs, [
+            { root: [-.55, 0, 0], facing: 1, cheek: [.18, 1.9, .16] },
+            { root: [.55, 0, 0], facing: -1, cheek: [-.18, 1.9, .16] },
+        ]);
+        this.pendingSkinState = state; this.pendingPoses = poses;
+        this.sampleActors(state);
         for (let i = 0; i < 2; i++) {
             const fighter = state.fighters[i];
             this.hpLabels[i].string = `${i === 0 ? '你' : '机器人'}  ${fighter.hp}/${DEFAULT_RULES.maxHp}`;
             const bar = this.hpBars[i]; bar.clear();
             bar.fillColor = new Color(C.panel); bar.rect(-120, -8, 240, 16); bar.fill();
             bar.fillColor = new Color(i === 0 ? C.blue : C.orange); bar.rect(-120, -8, 240 * fighter.hp / DEFAULT_RULES.maxHp, 16); bar.fill();
-            this.poseFigure(this.figures[i], poses[i]);
-        }
-        if (this.motionDiagnosticCanvas) {
-            const position = (node: Node): Point => [node.worldPosition.x, node.worldPosition.y, node.worldPosition.z];
-            this.motionSamples.push({ nowMs: state.nowMs, poses, actual: this.figures.map(f => ({
-                leadPalm: position(f.arms.lead.palm), rearPalm: position(f.arms.rear.palm), cheek: position(f.cheek), head: position(f.head),
-            })) });
-            if (this.motionSamples.length > 120) this.motionSamples.shift();
-            // Explicit diagnostic query only: read-only observations, never read into the simulation.
-            this.motionDiagnosticCanvas.setAttribute('data-slap-motion', JSON.stringify({
-                build: BUILD_ID, page: this.page, mode: this.mode, practice: this.practice, state, events: this.trace, samples: this.motionSamples,
-            }));
         }
         const names: Record<string, string> = { idle: '', charging: '蓄力中', windup: '出掌中', recovery: '收招中', guard: '防御中', stunned: '受击中', counter: '精准挡住 · 准备反击', parried: '被挡住 · 反击将至', 'counter-recovery': '反击收招中' };
         const charge = me.chargeStartMs === null ? 0 : clamp((state.nowMs - me.chargeStartMs) / DEFAULT_RULES.fullChargeMs);
@@ -631,6 +804,8 @@ export class SlapGame extends Component {
     }
 
     onDestroy(): void {
+        ++this.loadGeneration; this.clearActors();
+        for (const frame of this.portraitFrames) frame.destroy();
         this.frameDiagnosticCanvas?.removeAttribute('data-slap-diagnostics');
         this.motionDiagnosticCanvas?.removeAttribute('data-slap-motion');
         if (this.motionDiagnosticCanvas) director.off(Director.EVENT_AFTER_DRAW, this.captureContactFrame, this);

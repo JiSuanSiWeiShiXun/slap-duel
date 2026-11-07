@@ -1,0 +1,308 @@
+{
+  "schemaVersion": 1,
+  "source": {
+    "roleId": "manager",
+    "assetRevision": 1,
+    "rigSpecVersion": "office-humanoid-29-v1",
+    "generatorVersion": "office-cast-1",
+    "blenderVersion": "4.5.14 LTS",
+    "provenance": {
+      "kind": "original-procedural",
+      "author": "Slap Duel project",
+      "license": "Project original assets; editable generation source included",
+      "source": "tools/create-office-cast.py"
+    },
+    "guardHand": "lead",
+    "counterHand": "rear",
+    "export": {
+      "fps": 60,
+      "forward": "-Z",
+      "up": "Y",
+      "scale": 1,
+      "leafBones": false,
+      "allActions": false,
+      "nla": false,
+      "bakeSpaceTransform": false,
+      "animationBakeRate": 60
+    },
+    "portrait": {
+      "size": 512,
+      "samples": 20,
+      "pose": "intro-positive"
+    },
+    "displayName": "职场中层",
+    "facets": {
+      "positive": "表达有条理，擅长把复杂信息组织成一场清晰的汇报。",
+      "negative": "把同事做出的成果，包装成了自己精心部署的功劳。"
+    },
+    "appearance": {
+      "outfit": "blazer",
+      "hair": "swept",
+      "glasses": false,
+      "badge": false,
+      "skin": "#D7A17F",
+      "cloth": "#35516D",
+      "shirt": "#E7E3D8",
+      "dark": "#292735"
+    },
+    "proportions": {
+      "height": 1,
+      "shoulder": 1.05,
+      "waist": 1.12,
+      "head": 1,
+      "arm": 1
+    },
+    "motionProfile": {
+      "energy": 0.35,
+      "slouch": 0,
+      "chin": 0.055,
+      "lean": 0,
+      "smirk": 0.035
+    }
+  },
+  "generated": {
+    "generatorSha256": "3624a3951afa7391eebebb478600482bacb0354c649460f49b3df84f5bb016d7",
+    "sourceHash": "9fbfeb5bb5bcb5cacfd27f5d08ea987c0a05f53c75f75795164c6d0ee54daf56",
+    "portraitReviewed": true,
+    "outputs": {
+      "character.fbx": {
+        "path": "game/assets/resources/office-cast/manager/character.fbx",
+        "bytes": 1727372,
+        "sha256": "348bef7cb4d9988ef7c6861420ade568821e7319d68f69cac2c21d522166eed2",
+        "format": "FBX7400"
+      },
+      "portrait.png": {
+        "path": "game/assets/resources/office-cast/manager/portrait.png",
+        "bytes": 167494,
+        "sha256": "37a655d5325092394d216ca27e4470b49a65458cf69f2fac19361746c8d64d9c",
+        "format": "PNG-RGBA8",
+        "width": 512,
+        "height": 512
+      }
+    },
+    "mesh": {
+      "boneNames": [
+        "Root",
+        "Pelvis",
+        "Spine",
+        "Chest",
+        "Neck",
+        "Head",
+        "Jaw",
+        "Brow.L",
+        "Brow.R",
+        "Clavicle.L",
+        "UpperArm.L",
+        "Forearm.L",
+        "Hand.L",
+        "Thumb.L",
+        "Fingers.L",
+        "Thigh.L",
+        "Shin.L",
+        "Foot.L",
+        "Toe.L",
+        "Clavicle.R",
+        "UpperArm.R",
+        "Forearm.R",
+        "Hand.R",
+        "Thumb.R",
+        "Fingers.R",
+        "Thigh.R",
+        "Shin.R",
+        "Foot.R",
+        "Toe.R"
+      ],
+      "boneCount": 29,
+      "vertices": 3231,
+      "triangles": 5802,
+      "maxInfluences": 2,
+      "blendedVertices": 242,
+      "maxWeightError": 0,
+      "maxEvaluatedDisplacement": 0.9088592579251777,
+      "fcurves": 203,
+      "sourceClips": [
+        {
+          "name": "idle",
+          "from": 0,
+          "to": 2,
+          "fps": 60
+        },
+        {
+          "name": "intro-positive",
+          "from": 2.033333333333333,
+          "to": 3.033333333333333,
+          "fps": 60
+        },
+        {
+          "name": "intro-negative",
+          "from": 3.066666666666667,
+          "to": 4.066666666666666,
+          "fps": 60
+        },
+        {
+          "name": "charge",
+          "from": 4.1,
+          "to": 5.3,
+          "fps": 60
+        },
+        {
+          "name": "attack-light",
+          "from": 5.333333333333333,
+          "to": 6.333333333333333,
+          "fps": 60
+        },
+        {
+          "name": "attack-heavy",
+          "from": 6.366666666666666,
+          "to": 7.366666666666666,
+          "fps": 60
+        },
+        {
+          "name": "recovery",
+          "from": 7.4,
+          "to": 8.4,
+          "fps": 60
+        },
+        {
+          "name": "guard",
+          "from": 8.433333333333334,
+          "to": 9.433333333333334,
+          "fps": 60
+        },
+        {
+          "name": "hit",
+          "from": 9.466666666666667,
+          "to": 9.966666666666667,
+          "fps": 60
+        },
+        {
+          "name": "counter",
+          "from": 10,
+          "to": 11,
+          "fps": 60
+        },
+        {
+          "name": "counter-recovery",
+          "from": 11.033333333333333,
+          "to": 12.033333333333333,
+          "fps": 60
+        },
+        {
+          "name": "victory",
+          "from": 12.066666666666666,
+          "to": 13.566666666666666,
+          "fps": 60
+        },
+        {
+          "name": "defeat",
+          "from": 13.6,
+          "to": 15.1,
+          "fps": 60
+        }
+      ],
+      "visiblePortraitPixels": 50885,
+      "portraitPoseFrame": 152,
+      "blenderVersion": "4.5.14 LTS"
+    },
+    "convertedSkin": {
+      "boneNames": [
+        "Root",
+        "Pelvis",
+        "Spine",
+        "Chest",
+        "Neck",
+        "Head",
+        "Jaw",
+        "Brow.L",
+        "Brow.R",
+        "Clavicle.L",
+        "UpperArm.L",
+        "Forearm.L",
+        "Hand.L",
+        "Thumb.L",
+        "Fingers.L",
+        "Clavicle.R",
+        "UpperArm.R",
+        "Forearm.R",
+        "Hand.R",
+        "Thumb.R",
+        "Fingers.R",
+        "Thigh.L",
+        "Shin.L",
+        "Foot.L",
+        "Toe.L",
+        "Thigh.R",
+        "Shin.R",
+        "Foot.R",
+        "Toe.R"
+      ],
+      "inverseBindMatrices": 29,
+      "exportVertices": 3231,
+      "blendedVertices": 242,
+      "maxWeightError": 2.9802322387695312e-8,
+      "maxInfluences": 2,
+      "animationName": "Scene",
+      "animationChannels": 90,
+      "wrapperScale": [
+        100,
+        100,
+        100
+      ]
+    },
+    "imports": {
+      "modelUuid": "8af9517d-1571-47c9-b22f-6fb91a0afca4",
+      "prefabUuid": "8af9517d-1571-47c9-b22f-6fb91a0afca4@9d5eb",
+      "skeletonUuid": "8af9517d-1571-47c9-b22f-6fb91a0afca4@438fe",
+      "clipUuids": {
+        "idle": "8af9517d-1571-47c9-b22f-6fb91a0afca4@1f586",
+        "intro-positive": "8af9517d-1571-47c9-b22f-6fb91a0afca4@ecc11",
+        "intro-negative": "8af9517d-1571-47c9-b22f-6fb91a0afca4@2172a",
+        "charge": "8af9517d-1571-47c9-b22f-6fb91a0afca4@3d705",
+        "attack-light": "8af9517d-1571-47c9-b22f-6fb91a0afca4@4aad8",
+        "attack-heavy": "8af9517d-1571-47c9-b22f-6fb91a0afca4@1c63e",
+        "recovery": "8af9517d-1571-47c9-b22f-6fb91a0afca4@c8a37",
+        "guard": "8af9517d-1571-47c9-b22f-6fb91a0afca4@b3bd5",
+        "hit": "8af9517d-1571-47c9-b22f-6fb91a0afca4@79e35",
+        "counter": "8af9517d-1571-47c9-b22f-6fb91a0afca4@8703c",
+        "counter-recovery": "8af9517d-1571-47c9-b22f-6fb91a0afca4@344c4",
+        "victory": "8af9517d-1571-47c9-b22f-6fb91a0afca4@f39c0",
+        "defeat": "8af9517d-1571-47c9-b22f-6fb91a0afca4@b0e98"
+      },
+      "bonePaths": {
+        "Root": "OfficeRig/Root",
+        "Pelvis": "OfficeRig/Root/Pelvis",
+        "Spine": "OfficeRig/Root/Pelvis/Spine",
+        "Chest": "OfficeRig/Root/Pelvis/Spine/Chest",
+        "Neck": "OfficeRig/Root/Pelvis/Spine/Chest/Neck",
+        "Head": "OfficeRig/Root/Pelvis/Spine/Chest/Neck/Head",
+        "Jaw": "OfficeRig/Root/Pelvis/Spine/Chest/Neck/Head/Jaw",
+        "Brow.L": "OfficeRig/Root/Pelvis/Spine/Chest/Neck/Head/Brow.L",
+        "Brow.R": "OfficeRig/Root/Pelvis/Spine/Chest/Neck/Head/Brow.R",
+        "Clavicle.L": "OfficeRig/Root/Pelvis/Spine/Chest/Clavicle.L",
+        "UpperArm.L": "OfficeRig/Root/Pelvis/Spine/Chest/Clavicle.L/UpperArm.L",
+        "Forearm.L": "OfficeRig/Root/Pelvis/Spine/Chest/Clavicle.L/UpperArm.L/Forearm.L",
+        "Hand.L": "OfficeRig/Root/Pelvis/Spine/Chest/Clavicle.L/UpperArm.L/Forearm.L/Hand.L",
+        "Thumb.L": "OfficeRig/Root/Pelvis/Spine/Chest/Clavicle.L/UpperArm.L/Forearm.L/Hand.L/Thumb.L",
+        "Fingers.L": "OfficeRig/Root/Pelvis/Spine/Chest/Clavicle.L/UpperArm.L/Forearm.L/Hand.L/Fingers.L",
+        "Clavicle.R": "OfficeRig/Root/Pelvis/Spine/Chest/Clavicle.R",
+        "UpperArm.R": "OfficeRig/Root/Pelvis/Spine/Chest/Clavicle.R/UpperArm.R",
+        "Forearm.R": "OfficeRig/Root/Pelvis/Spine/Chest/Clavicle.R/UpperArm.R/Forearm.R",
+        "Hand.R": "OfficeRig/Root/Pelvis/Spine/Chest/Clavicle.R/UpperArm.R/Forearm.R/Hand.R",
+        "Thumb.R": "OfficeRig/Root/Pelvis/Spine/Chest/Clavicle.R/UpperArm.R/Forearm.R/Hand.R/Thumb.R",
+        "Fingers.R": "OfficeRig/Root/Pelvis/Spine/Chest/Clavicle.R/UpperArm.R/Forearm.R/Hand.R/Fingers.R",
+        "Thigh.L": "OfficeRig/Root/Pelvis/Thigh.L",
+        "Shin.L": "OfficeRig/Root/Pelvis/Thigh.L/Shin.L",
+        "Foot.L": "OfficeRig/Root/Pelvis/Thigh.L/Shin.L/Foot.L",
+        "Toe.L": "OfficeRig/Root/Pelvis/Thigh.L/Shin.L/Foot.L/Toe.L",
+        "Thigh.R": "OfficeRig/Root/Pelvis/Thigh.R",
+        "Shin.R": "OfficeRig/Root/Pelvis/Thigh.R/Shin.R",
+        "Foot.R": "OfficeRig/Root/Pelvis/Thigh.R/Shin.R/Foot.R",
+        "Toe.R": "OfficeRig/Root/Pelvis/Thigh.R/Shin.R/Foot.R/Toe.R"
+      },
+      "rawAnimationNames": [
+        "Scene"
+      ],
+      "portraitTextureUuid": "fc0ad401-c0db-4fa3-aff6-bbdb55133752@6c48a"
+    }
+  }
+}
