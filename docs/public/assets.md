@@ -1,10 +1,51 @@
-# 原创职场角色与可重建资源
+# 角色资产来源与制作管线
 
-三名虚构成人角色 `manager`、`veteran`、`rookie` 使用项目原创参数网格、材质、29 骨 Armature、归一化蒙皮和性格动作。没有第三方模型、贴图、肖像或外部绑定服务。来源声明与授权文字逐角色保存在 `manifest.json` 的 `source.provenance`，当前为 `Project original assets; editable generation source included`；这份说明不另行授予不同许可。
+## v2 人物质量返工（开发中）
+
+当前质量返工先替换 `manager`：采用完整人形与服装基础，定制角色形体、头发、材质、骨架、权重、动作和立绘。该谱系是 **CC0 基础资产上的角色改造**，不能称为全部网格和纹理均由本项目原创。首样已接入实际 Cocos Web 默认选角与对战，运行结果按具体构建记录；另两人暂保留 v1。首人物质量仍待本人采用，新版完整干净重建和手机验证仍待完成；下文 v1 运行记录只保留原版本范围。
+
+| 选用基础 | 作者 / 许可 | 固定来源 |
+|---|---|---|
+| Human Base Meshes v1.4.1，`GEO-body_male_realistic` | Dan Ulrich；CC0（同包 Body Male - Realistic 资产元数据） | [Blender 官方资产页](https://www.blender.org/download/demo-files/#assets)、[官方 ZIP](https://download.blender.org/demo/asset-bundles/human-base-meshes/human-base-meshes-bundle-v1.4.1.zip)；50,643,039 bytes；SHA256 `811f43accbb31a88266d932f8f5563b2d13586fca0ba2693aad1f5fe582b3515` |
+| suits01，`toigo_male_suit_3/suit3.obj` 及该套装贴图 | MRT；CC0（所选资产 MHCLO 的 author/license 记录） | [MakeHuman 官方资源包](https://files2.makehumancommunity.org/asset_packs/suits01/suits01_cc0.zip)；42,624,017 bytes；SHA256 `2b1d8676f3863b188e9eea98c1d8f234543d54c440e791d92b819f8ee1861f19` |
+
+这里的 SHA256 是实际下载后的内容校验值，不是厂商签名。只使用上述明确记录的资产；同一网站其他 CC-BY 或不同许可的文件不因此被纳入。衣片针对当前人体重新拟合、重新赋权，未将 MakeHuman `hm08` 的顶点索引绑定数据套到另一种拓扑。
+
+新制作入口是 `tools/create-office-human.py`，目前只支持 `manager`。`source.generatorVersion=office-human-2`、`source.provenance.kind=cc0-derived`；人体、衣片与纹理固定出处/哈希，以及本项目制作代码、角色参数、实际 rig/rest、材质和掌颊锚点共同记录在角色 manifest。实际制作代码哈希和角色 `sourceHash` 以该次生成的 manifest 为准，不复用 v1 冻结哈希。保留 29 个语义骨并不意味着复用 v1 的绑定或动作偏移。
+
+取得固定版本的官方包并核对上述哈希后，将其所需数据解压到项目内：
+
+- `game/local/art-source/human-base-meshes-bundle-v1.4.1/human_base_meshes_bundle.blend`
+- `game/local/art-source/suits01/clothes/toigo_male_suit_3/`（同包 OBJ 与贴图）
+
+使用相同的项目内 Blender 4.5.14 portable，在仓库根目录生成；Blender 子进程禁用外来脚本自动执行：
+
+```text
+python tools/create-office-human.py --role manager
+```
+
+用 Creator 3.8.8 完成实际资源导入后再同步、检查导入身份：
+
+```text
+python tools/create-office-human.py --role manager --sync-imports
+python tools/create-office-human.py --role manager --check
+node tools/check-character-assets.mjs --check
+node tools/check-public-tree.mjs
+```
+
+原生可编辑源在 `game/local/character-source-v2/manager.blend`；所选角色目录只公开 manifest 白名单中的派生 FBX、同源 PNG/贴图及对应 `.meta`。官方源包、原生文件、制作日志和私人验收记录不纳入公开树。贴图和模型仍须经过签名、内容、路径与隐私检查；采用外部基础不放宽这些边界。
+
+以上是开发中的制作入口；新版干净重建、变参恢复、双平台运行和本人采用分别记录，尚未完成的项目不宣称通过。下文 `--rebuild` 的已执行记录仅针对 v1，不证明当前混合谱系已完成新版重建。
+
+## v1 原创参数角色（历史合同与证据）
+
+以下保留已交付 v1 的制作合同、哈希和实际运行范围。`manager` 表中旧哈希是 v1 恢复版，不能作为当前 v2 参数或输出身份。
+
+v1 的三名虚构成人角色 `manager`、`veteran`、`rookie` 使用项目原创参数网格、材质、29 骨 Armature、归一化蒙皮和性格动作。当时没有第三方模型、贴图、肖像或外部绑定服务。来源声明与授权文字逐角色保存在 v1 `manifest.json` 的 `source.provenance`，为 `Project original assets; editable generation source included`；这份声明不覆盖上文 v2 外部基础，也不另行授予不同许可。
 
 公开制作源为 `tools/create-office-cast.py` 和 `game/assets/resources/office-cast/<role>/manifest.json` 的 `source`。本地可编辑原生源位于 `game/local/character-source/<role>.blend`，不进入公开树。FBX 和透明立绘位于对应角色目录，立绘直接渲染同一模型、材质、骨架的介绍姿势。原生源、工具回执、概念与运行证据保持私有。
 
-## 固定制作合同
+## v1 固定制作合同
 
 - Blender **4.5.14 LTS**，官方 Windows x64 portable；本次沿用项目内已核验的安装与 SHA256 回执，不复制或下载另一套工具。官方归档为 [blender-4.5.14-windows-x64.zip](https://download.blender.org/release/Blender4.5/blender-4.5.14-windows-x64.zip)，ZIP SHA256 为 `b9533d2397ac1984db4466fb23a7a4649391cca93f6e84209f9bcc60d071c8b9`。可复现环境需要相同版本放入 `game/local/toolchain/blender-4.5.14-windows-x64/`，并保留本机核验回执 `game/local/toolchain/blender-receipt.json`；回执不公开。
 - Cocos Creator **3.8.8**，使用已安装的 FBX converter 和真实编辑器导入。
@@ -14,7 +55,7 @@
 - 每人独立网格、权重、逆绑定和 Skeleton；语义骨名相同不代表可以共享 bind pose。每顶点最多四个有效权重，权重和误差小于 `0.00001`。
 - 每人同源 512×512 RGBA8 透明 PNG。公开扫描只允许固定 PNG chunks，检查 CRC、解压预算与私密字符串；FBX 同时扫描原始字符串和受限解压数组。未查看的新立绘不得把 `portraitReviewed` 改为 true。
 
-## 角色与稳定引用
+## v1 角色与稳定引用
 
 | role | sourceHash | 模型 UUID | 立绘 texture UUID |
 |---|---|---|---|
@@ -24,7 +65,7 @@
 
 每个 FBX 的 prefab 子 UUID 为模型 UUID 加 `@9d5eb`，Skeleton 为模型 UUID 加 `@438fe`。13 个实际 clip UUID、全部骨路径、输出大小与 SHA256 以该角色 `generated.imports/outputs` 为准；检查器逐项比对真实 `.meta` 和导入后的 library。保留现有 `.meta`，不能自行编造新子资产 UUID。
 
-## 动作时间线
+## v1 动作时间线与接入
 
 | clip | 源时间秒 from→to |
 |---|---|
@@ -46,7 +87,7 @@
 
 `CharacterView` 在首次激活前设 `useBakedAnimation=false`，update 采样、引擎应用后 lateUpdate 对齐真实 deform 骨。两侧都使用正缩放和外层旋转。`lead` 对左演员映射 `Hand.L`、对右演员映射 `Hand.R`，`rear` 相反；掌心与脸颊由当前骨 worldMatrix 取点，再经 `characterContacts` / two-bone IK 对齐。因此双侧锚点来自各自真实皮肤，不能把同骨名当作同一绑定。
 
-## 检查与干净重建
+## 检查与干净重建（当前混合谱系入口）
 
 在仓库根目录执行：
 
@@ -57,23 +98,23 @@ node tools/check-character-assets.mjs --rebuild
 node tools/check-public-tree.mjs
 ```
 
-`--check` 验证三角色原创源/hash、FBX/PNG 签名与输出 hash、完整 clip 区间、全部真实 meta UUID；再用冻结原脚本重转换 FBX 验证 JOINTS/WEIGHTS/逆绑定，读取真实 Creator Skeleton、SkinnedMeshRenderer 和 clip 数据。它会更新被忽略的 converter 诊断；它的通过结论是文件与导入身份，实际画面和体验另行验证。
+`--check` 按每名角色的 manifest 谱系选择 v2 人物合同或冻结 v1 合同，验证来源/hash、FBX/PNG 签名与输出 hash、完整 clip 区间及全部真实 meta UUID；转换也按谱系使用对应生成器，核对 JOINTS/WEIGHTS/逆绑定和真实 Creator Skeleton、SkinnedMeshRenderer、clip 数据。v2 另查 fabric 贴图、9 个材质、rest/掌颊锚点与实际 60 FPS 秒轴。它会更新被忽略的 converter 诊断；通过结论是文件与导入身份，实际画面和体验另行验证。
 
 `--rebuild` 在 `game/local/asset-rebuild/` 创建一个新的唯一目录，也支持 `--name UNIQUE_NAME`。已有目标拒绝覆盖，不能传任意 source/output/tool 路径。复制来自公开跟踪文件的明确白名单：源码、源参数、meta、构建模板与配置、必要工具/测试/公开说明；不复制 FBX/PNG 成品、凭据、账号配置、规划、portable、library/temp/build/profiles 或私人文件。源路径和目标路径中的 symlink/junction 均拒绝。
 
-随后只调用**原项目冻结脚本**的受控 `--source-root/--output-root` 模式重生三人 FBX、同源 PNG 与副本 blend；不执行副本生成器。全新缓存导入由副本的真实 `build-game.ps1 -Target web-desktop` 完成。初导造成输入指纹变化时，保留失败回执、同步真实 import/meta，再稳定构建；不跳过指纹保护。
+随后按每名角色谱系调用**原项目对应生成器**的受控 `--source-root/--output-root` 模式：v1 使用冻结 `create-office-cast.py`，v2 使用 `create-office-human.py`；不执行副本生成器。分别重生 FBX、同源 PNG 与副本 blend，v2 还生成 fabric 贴图及 v2 原生源。全新缓存导入由副本的真实 `build-game.ps1 -Target web-desktop` 完成。初导造成输入指纹变化时，保留失败回执、同步真实 import/meta，再稳定构建；不跳过指纹保护。此处描述当前入口行为，新版混合谱系的完整干净重建尚待执行，不能借用下文 v1 成功记录。
 
 每个副本保留 `rebuild-report.json`：公开输入逐文件 hash、生成器退出码、复制前无旧缓存事实、每次 Creator 构建日志、稳定 build manifest、三人独立 bindPose 与引用检查。报告另列新生成的模型/原生源/cache/build 文件及 path/大小/hash，并单列被制作器或 Creator 改写的已复制文件前后 hash。`runtimePassed` 初始为 false；生成、导入和构建成功不会自动把实际运行写成通过。按返回副本路径使用其 `tools/serve.mjs --port 7457` 提供本地 Web，实际选择三人并观察代表轻击、普通格挡和两段反击，再保存运行证据。
 
 造型修改应在 manifest.source 支持的合法参数内进行，并依次完成生成、Creator 导入、Web 构建、立绘与皮肤直接查看。恢复源值之后同样真实重建和查看。临时 sourceHash 与固定 FK fixture 不一致是预期保护，不能永久放宽断言。最终参数、meta UUID、文件检查与公开扫描必须恢复有效。
 
-## 已执行的干净重建
+## 已执行的干净重建（v1）
 
 2026-11-07 使用 `node tools/check-character-assets.mjs --rebuild --name phase2-09-clean-final-20261107` 实际重生三人。副本复制 89 个白名单输入，复制前 library/temp/build/local/profiles 均不存在；三次生成退出码 0，首次真实 Creator 导入与 Web 构建退出码 36，wrapper 成功。稳定构建为 `P1-b25a9a0-d4789a78-20261107T143053867Z`；新产物严格二进制政策及复制前后完整 import 身份比较通过。
 
 390×844 桌面原生输入实际选择三人进入介绍与对战，每人实际 renderer=1、joints=29；manager 蓄力模式短掌伤害 1，veteran 点击模式普通格挡伤害 0，rookie 精准格挡在 1680ms 伤害 0、1860ms 反掌伤害 1。原始立绘及连续反击画面已直接查看。首次 rookie 防御按早了，正确得到普通格挡，仅重试进入精准窗口的案例计作反击通过。运行证据与回执保持在本地私有目录。
 
-## 已执行的造型往返
+## 已执行的造型往返（v1）
 
 只修改 manager 的合法 `source.appearance.hair`：`swept → receding → swept`，每步使用冻结原脚本重新生成 FBX、PNG 和本地 `.blend`，并真实 Creator 重导入与 Web 构建。
 
