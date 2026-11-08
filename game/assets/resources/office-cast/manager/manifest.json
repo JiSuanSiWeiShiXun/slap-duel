@@ -121,7 +121,7 @@
   "generated": {
     "generatorSha256": "ba4a5059f96fa12ec97583730625c1475598e81ff5bec138942efecb2efa2ecb",
     "sourceHash": "4f1fba57132b032e0b68d7a2ffca57b7c50a6a373dfcfab57d33347a91e3b165",
-    "portraitReviewed": false,
+    "portraitReviewed": true,
     "outputs": {
       "character.fbx": {
         "path": "game/assets/resources/office-cast/manager/character.fbx",
