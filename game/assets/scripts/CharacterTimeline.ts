@@ -1,18 +1,18 @@
 import { ActorId, BattleEvent, BattleState, DEFAULT_RULES } from './core/Battle';
-import { ParryMotion, FighterPose, Point } from './ParryMotion';
+import { ParryMotion, FighterPose, Point, FighterAnchors } from './ParryMotion';
 
 export interface ArmSolution {
   elbow: Point; wrist: Point; reachable: boolean; requestedDistance: number; solvedDistance: number; error: number;
 }
-export function solveTwoBone(shoulder: Point, upperLength: number, foreLength: number, palm: Point, palmOffset: number): ArmSolution {
-  if (![...shoulder, ...palm, upperLength, foreLength, palmOffset].every(Number.isFinite) || upperLength <= 0 || foreLength <= 0 || palmOffset < 0) throw new Error('Arm geometry must be finite and positive');
+export function solveTwoBone(shoulder: Point, upperLength: number, foreLength: number, palm: Point, palmOffset: number, bendHint: Point = [0,-1,-.15]): ArmSolution {
+  if (![...shoulder, ...palm, ...bendHint, upperLength, foreLength, palmOffset].every(Number.isFinite) || upperLength <= 0 || foreLength <= 0 || palmOffset < 0) throw new Error('Arm geometry must be finite and positive');
   const target: Point = [palm[0], palm[1] - palmOffset, palm[2]];
   const delta = target.map((v, i) => v - shoulder[i]) as Point;
   const requestedDistance = Math.hypot(...delta), min = Math.abs(upperLength - foreLength) + 1e-7, max = upperLength + foreLength - 1e-7;
   const solvedDistance = Math.max(min, Math.min(requestedDistance, max));
   const direction = requestedDistance > 1e-9 ? delta.map(v => v / requestedDistance) as Point : [1, 0, 0] as Point;
   const dot = (a: Point, b: Point) => a.reduce((s,v,i) => s+v*b[i],0);
-  let bend: Point = [0, -1, -.15], projection = dot(bend, direction);
+  let bend: Point = [...bendHint], projection = dot(bend, direction);
   bend = bend.map((v,i) => v-direction[i]*projection) as Point;
   if (Math.hypot(...bend) < 1e-8) { bend = [0,0,1]; projection = dot(bend,direction); bend = bend.map((v,i)=>v-direction[i]*projection) as Point; }
   const bendLength = Math.hypot(...bend); bend = bend.map(v=>v/bendLength) as Point;
@@ -24,34 +24,42 @@ export function solveTwoBone(shoulder: Point, upperLength: number, foreLength: n
     error: Math.hypot(...wrist.map((v,i)=>v-target[i])) };
 }
 
-export interface ContactAnchors { root: Point; cheek: Point; leadPalm: Point; rearPalm: Point; }
+export function presentationSide(actorId: 0|1, playerStation: 0|1 = 0): 0|1 {
+  if((actorId!==0&&actorId!==1)||(playerStation!==0&&playerStation!==1)) throw new Error('Invalid presentation side');
+  return (playerStation===0?actorId:1-actorId) as 0|1;
+}
+export interface CharacterStaging { baseX: number; motionScale?: number; side?: 0|1; }
+export interface ContactAnchors { root: Point; cheek: Point; leadPalm: Point; rearPalm: Point; staging?: CharacterStaging; }
 export interface ContactTargets { lead: Point | null; rear: Point | null; }
 // Rule-time visual hold makes the actual contact drawable even when a frame lands just after the hit.
 export const COUNTER_CONTACT_HOLD_MS = 48;
 /** Targets use actual post-apply bone anchors; no socket or animation duration is a rule clock. */
 export function characterContacts(state: Readonly<BattleState>, anchors: readonly [ContactAnchors, ContactAnchors]): [ContactTargets, ContactTargets] {
   if (anchors.some(a=>[...a.root,...a.cheek,...a.leadPalm,...a.rearPalm].some(v=>!Number.isFinite(v)))) throw new Error('Contact anchors must be finite');
+  if(anchors.some(a=>a.staging&&(!Number.isFinite(a.staging.baseX)||(a.staging.side!==undefined&&a.staging.side!==0&&a.staging.side!==1)||(a.staging.motionScale!==undefined&&(!Number.isFinite(a.staging.motionScale)||a.staging.motionScale<=0||a.staging.motionScale>2))))) throw new Error('Character staging must be finite and positive');
   const clamp = (n: number) => Math.max(0,Math.min(1,n));
   const lerp = (a: Point,b: Point,t: number): Point => a.map((v,i)=>v+(b[i]-v)*clamp(t)) as Point;
-  const guarded = anchors.map((a,i)=>[a.cheek[0]+(i===0?.10:-.10),a.cheek[1]-.025,a.cheek[2]+.07] as Point);
+  const guarded = anchors.map((a,i)=>{ const scale=a.staging?.motionScale??1, side=a.staging?.side??i; return [a.cheek[0]+(side===0?.10:-.10)*scale,a.cheek[1]-.025*scale,a.cheek[2]+.07*scale] as Point; });
   return state.fighters.map((f,i)=>{
     if (state.result) return {lead:null,rear:null};
-    const own=anchors[i], other=anchors[1-i], facing=i===0?1:-1, age=state.nowMs-f.phaseStartMs;
+    const own=anchors[i], other=anchors[1-i], facing=(own.staging?.side??i)===0?1:-1, age=state.nowMs-f.phaseStartMs;
+    const scale=own.staging?.motionScale??1, y=(legacy: number)=>own.staging?.motionScale===undefined?legacy:own.cheek[1]+(legacy-1.88)*scale;
+    const base=own.staging?.baseX??(i===0?-.55:.55);
     let lead: Point|null=null, rear: Point|null=null;
     // Source clips are L-led; explicit two-hand targets preserve semantic duties at either station.
-    if (['charging','guard','windup','recovery','parried'].includes(f.phase)) rear=[own.root[0]-facing*.43,1.05,.3];
+    if (['charging','guard','windup','recovery','parried'].includes(f.phase)) rear=[own.root[0]-facing*.43*scale,y(1.05),.3*scale];
     if (f.phase==='charging') {
       const charge=clamp(age/DEFAULT_RULES.fullChargeMs);
-      lead=[own.root[0]+facing*(.23-.12*charge),1.35+.10*charge,.4-.08*charge];
+      lead=[own.root[0]+facing*(.23-.12*charge)*scale,y(1.35+.10*charge),(.4-.08*charge)*scale];
     }
     if (f.phase==='guard') lead=lerp(own.leadPalm,guarded[i],age/60);
     if (f.phase==='counter'||f.phase==='counter-recovery') lead=guarded[i];
     if (f.phase==='parried') lead=guarded[f.parriedBy??1-i];
-    const rest: Point=[(i===0?-.55:.55)+facing*.48,1.25,.48];
-    if (f.phase==='windup') lead=lerp([(i===0?-.55:.55)+facing*.25,1.55,.15],state.fighters[1-i].phase==='guard'?guarded[1-i]:other.cheek,(age/DEFAULT_RULES.windupMs-.65)/.35);
+    const rest: Point=[base+facing*.48*scale,y(1.25),.48*scale];
+    if (f.phase==='windup') lead=lerp([base+facing*.25*scale,y(1.55),.15*scale],state.fighters[1-i].phase==='guard'?guarded[1-i]:other.cheek,(age/DEFAULT_RULES.windupMs-.65)/.35);
     if (f.phase==='recovery') lead=lerp(other.cheek,rest,age/DEFAULT_RULES.recoveryMs);
-    if (f.phase==='counter') rear=lerp([own.root[0]-facing*.35,1.65,.18],other.cheek,(age/DEFAULT_RULES.counterWindupMs-.32)/.68);
-    if (f.phase==='counter-recovery') rear=lerp(other.cheek,[(i===0?-.55:.55)-facing*.35,1.1,.25],(age-COUNTER_CONTACT_HOLD_MS)/(DEFAULT_RULES.counterRecoveryMs-COUNTER_CONTACT_HOLD_MS));
+    if (f.phase==='counter') rear=lerp([own.root[0]-facing*.35*scale,y(1.65),.18*scale],other.cheek,(age/DEFAULT_RULES.counterWindupMs-.32)/.68);
+    if (f.phase==='counter-recovery') rear=lerp(other.cheek,[base-facing*.35*scale,y(1.1),.25*scale],(age-COUNTER_CONTACT_HOLD_MS)/(DEFAULT_RULES.counterRecoveryMs-COUNTER_CONTACT_HOLD_MS));
     return {lead,rear};
   }) as [ContactTargets,ContactTargets];
 }
@@ -92,13 +100,11 @@ export class CharacterTimeline {
     }
     this.motion.consume(state, fresh);
   }
-  sample(state: Readonly<BattleState>, nowMs = state.nowMs, resultElapsedMs = 0): [CharacterSample, CharacterSample] {
+  sample(state: Readonly<BattleState>, nowMs = state.nowMs, resultElapsedMs = 0, playerStation: 0|1 = 0): [CharacterSample, CharacterSample] {
     if (!Number.isFinite(nowMs) || !Number.isFinite(resultElapsedMs)) throw new Error('Character time must be finite');
     const clamp = (n: number) => Math.max(0, Math.min(1, n));
-    const poses = this.motion.sample(state, nowMs, [
-      { root: [-.55, 0, 0], facing: 1, cheek: [.18, 1.9, .16] },
-      { root: [.55, 0, 0], facing: -1, cheek: [-.18, 1.9, .16] },
-    ]);
+    const stageAnchors=([0,1] as const).map(actor=>{const facing=presentationSide(actor,playerStation)===0?1:-1; return {root:[-.55*facing,0,0] as Point,facing,cheek:[.18*facing,1.9,.16] as Point};}) as [FighterAnchors,FighterAnchors];
+    const poses = this.motion.sample(state, nowMs, stageAnchors);
     return state.fighters.map((f, side) => {
       const age = Math.max(0, nowMs - f.phaseStartMs);
       let semanticClip = 'idle', normalizedTime = (Math.max(0, nowMs) % 2000) / 2000, lunge = 0;

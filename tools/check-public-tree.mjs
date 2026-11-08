@@ -5,10 +5,11 @@ import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
 import zlib from 'node:zlib';
 import assert from 'node:assert/strict';
+import { HUMAN_BASE, HUMAN_CLOTHING, HUMAN_GENERATOR, HUMAN_MATERIALS, isHumanSource, validateHumanSource, validateHumanOutputs, validateHumanTimelineContract } from './human-asset-contract.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const git = args => execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
-const allowed = /^(?:\.gitattributes|\.gitignore|README\.md|package\.json|tsconfig\.rules\.json|docs\/public\/[A-Za-z0-9-]+\.md|tests\/[A-Za-z0-9.-]+\.cjs|tools\/(?:create-office-cast\.py|[A-Za-z0-9.-]+\.(?:mjs|ps1))|game\/(?:assets|build-config|build-templates|settings)\/.+|game\/(?:package|tsconfig)\.json)$/;
+const allowed = /^(?:\.gitattributes|\.gitignore|README\.md|package\.json|tsconfig\.rules\.json|docs\/public\/[A-Za-z0-9-]+\.md|tests\/(?:[A-Za-z0-9.-]+\.cjs|fixtures\/human-manager-geometry\.json)|tools\/(?:create-office-(?:cast|human)\.py|[A-Za-z0-9.-]+\.(?:mjs|ps1))|game\/(?:assets|build-config|build-templates|settings)\/.+|game\/(?:package|tsconfig)\.json)$/;
 const blocked = /(?:^|\/)(?:\.planning|\.notion-pm-private|node_modules|library|temp|local|profiles|build|\.ssh)(?:\/|$)|(?:^|\/)(?:AGENTS\.md|project\.private\.config\.json|information\.json|verify-evidence\.mjs)$|\.(?:pem|key|p12|pfx|png|jpe?g|zip|gz)$/i;
 const detectors = [
   ['private-key', /-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----/],
@@ -21,7 +22,7 @@ const detectors = [
   ['private-notion-link', /https?:\/\/(?:app\.)?notion\.(?:com|so)\//i],
   ['account-form-session', /https?:\/\/[^\s"']+[?&](?:sid|token|access_token)=[A-Za-z0-9_-]{12,}/i],
 ];
-const binaryPath = /^game\/assets\/resources\/office-cast\/(manager|veteran|rookie)\/(character\.fbx|portrait\.png)$/;
+const binaryPath = /^game\/assets\/resources\/office-cast\/(manager|veteran|rookie)\/(character\.fbx|portrait\.png|fabric\.png)$/;
 const sha = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const canonical = value => value && typeof value === 'object'
   ? Array.isArray(value) ? value.map(canonical) : Object.fromEntries(Object.keys(value).sort().map(k => [k, canonical(value[k])])) : value;
@@ -95,21 +96,26 @@ export function checkPng(bytes, report = category => { throw new Error(`PNG sens
   scanReadableBytes(pixels, report);
   return { width, height };
 }
-export function checkFbx(bytes, report) {
+export function checkFbx(bytes, report, options) {
   assert(bytes.subarray(0, 23).equals(Buffer.from('Kaydara FBX Binary  \0\x1a\0', 'binary')), 'FBX signature');
   assert(bytes.readUInt32LE(23) === 7400 && bytes.length < 24 * 1024 * 1024, 'FBX version/size');
+  const mediaNames = options?.mediaNames || [];
+  if (options) assert.deepEqual(options, { mediaNames: ['fabric.png'] }, 'Only the declared human fabric media contract is admitted');
+  const referencedMedia = new Set();
   let budget = 0, nodes = 0;
   const scan = b => scanReadableBytes(b, report);
   scan(bytes);
-  function node(p, parentEnd, depth = 0) {
+  function node(p, parentEnd, depth = 0, parents = []) {
     assert(depth <= 64 && ++nodes <= 100000 && p + 13 <= parentEnd, 'FBX node limit');
     const end = bytes.readUInt32LE(p), count = bytes.readUInt32LE(p + 4), size = bytes.readUInt32LE(p + 8), length = bytes[p + 12];
     if (!end) { assert(count === 0 && size === 0 && length === 0, 'FBX null'); return p + 13; }
     assert(end <= parentEnd && end > p + 13 + length && count <= 100000, 'FBX node bounds');
     const name = bytes.toString('utf8', p + 13, p + 13 + length); scan(bytes.subarray(p + 13, p + 13 + length));
-    assert(!['Video', 'Texture', 'Media', 'Content'].includes(name), 'FBX external media rejected');
+    assert(name !== 'Content', 'FBX embedded media rejected');
+    assert(!['Video', 'Texture', 'Media'].includes(name) || mediaNames.length > 0, 'FBX external media rejected');
     let q = p + 13 + length, propsEnd = q + size;
     assert(propsEnd <= end, 'FBX properties bounds');
+    const stringProperties = [];
     for (let i = 0; i < count; i++) {
       assert(q < propsEnd, 'FBX property count');
       const kind = String.fromCharCode(bytes[q++]);
@@ -117,7 +123,10 @@ export function checkFbx(bytes, report) {
       if (fixed) { assert(q + fixed <= propsEnd, 'FBX scalar bounds'); q += fixed; }
       else if (kind === 'S' || kind === 'R') {
         assert(q + 4 <= propsEnd, 'FBX string header'); const n = bytes.readUInt32LE(q); q += 4;
-        assert(q + n <= propsEnd && n < 4 * 1024 * 1024, 'FBX string bounds'); scan(bytes.subarray(q, q + n)); q += n;
+        assert(q + n <= propsEnd && n < 4 * 1024 * 1024, 'FBX string bounds');
+        const value = bytes.subarray(q, q + n); scan(value);
+        if (kind === 'S') stringProperties.push(value.toString('utf8'));
+        q += n;
       } else {
         const stride = { f: 4, d: 8, l: 8, i: 4, b: 1, c: 1 }[kind];
         assert(stride && q + 12 <= propsEnd, 'FBX array type/header');
@@ -130,12 +139,22 @@ export function checkFbx(bytes, report) {
       }
     }
     assert(q === propsEnd, 'FBX property size');
-    while (q < end) q = node(q, end, depth + 1);
+    const mediaContext = parents.includes('Video') || parents.includes('Texture');
+    if (mediaNames.length && mediaContext && ['Filename', 'FileName', 'RelativeFilename', 'RelativeFileName'].includes(name)) {
+      assert(count === 1 && stringProperties.length === 1 && mediaNames.includes(stringProperties[0]), 'FBX media filename is not an exact declared relative asset');
+      referencedMedia.add(stringProperties[0]);
+    }
+    if (mediaNames.length && name === 'Media') assert(count === 1 && stringProperties.length === 1 &&
+      stringProperties[0] === 'OfficeFabric\0\x01Video', 'FBX media reference rejected');
+    if (mediaNames.length && name === 'Video') assert(stringProperties[0] === 'OfficeFabric\0\x01Video', 'FBX video identity rejected');
+    if (mediaNames.length && parents.includes('Video') && name === 'P' && stringProperties[0] === 'Path') assert(stringProperties.at(-1) === 'fabric.png', 'FBX video path is not an exact declared relative asset');
+    while (q < end) q = node(q, end, depth + 1, [...parents, name]);
     assert(q === end, 'FBX node end'); return end;
   }
   let p = 27;
   while (p + 13 <= bytes.length && bytes.readUInt32LE(p)) p = node(p, bytes.length);
   assert(nodes > 0, 'FBX empty');
+  if (mediaNames.length) assert.deepEqual([...referencedMedia].sort(), [...mediaNames].sort(), 'FBX declared texture reference missing');
 }
 function audit(files, read) {
   const findings = [];
@@ -149,14 +168,29 @@ function audit(files, read) {
         const manifestPath = `game/assets/resources/office-cast/${binary[1]}/manifest.json`;
         assert(files.includes(manifestPath), 'Unlisted manifest');
         const manifest = JSON.parse(read(manifestPath));
-        assert(manifest.schemaVersion === 1 && manifest.source.roleId === binary[1] && manifest.source.provenance.kind === 'original-procedural', 'Asset provenance');
-        assert(files.includes('tools/create-office-cast.py'), 'Unlisted generator');
-        const generator = read('tools/create-office-cast.py'), g = manifest.generated;
+        assert(manifest.schemaVersion === 1 && manifest.source.roleId === binary[1], 'Asset provenance');
+        const human = isHumanSource(manifest.source);
+        if (human) {
+          validateHumanSource(manifest.source, binary[1]);
+          for (const name of validateHumanOutputs(manifest.generated)) assert(files.includes(`game/assets/resources/office-cast/${binary[1]}/${name}`), 'Unlisted human output');
+          assert(files.includes('tools/human-asset-contract.mjs'), 'Unlisted human contract');
+          const metaPath = `game/assets/resources/office-cast/${binary[1]}/character.fbx.meta`;
+          assert(files.includes(metaPath), 'Unlisted human import metadata');
+          const raw = JSON.parse(read(metaPath)).userData?.animationImportSettings;
+          assert(Array.isArray(raw) && raw.length === 1, 'Human raw import timeline missing');
+          validateHumanTimelineContract(manifest.generated.mesh, manifest.generated.convertedSkin, raw[0].duration);
+        }
+        else assert(manifest.source.provenance.kind === 'original-procedural' && binary[2] !== 'fabric.png', 'Asset provenance');
+        const generatorPath = human ? HUMAN_GENERATOR : 'tools/create-office-cast.py';
+        assert(files.includes(generatorPath), 'Unlisted generator');
+        const generator = read(generatorPath), g = manifest.generated;
         assert(g.generatorSha256 === sha(generator) && g.sourceHash === sha(Buffer.concat([generator, Buffer.from(JSON.stringify(canonical(manifest.source)))])), 'Source identity');
         const record = g.outputs[binary[2]];
         assert(record?.path === file && record.bytes === bytes.length && record.sha256 === sha(bytes), 'Asset hash/size/path');
-        if (binary[2] === 'portrait.png') { assert(g.portraitReviewed === true, 'Portrait not reviewed'); const size = checkPng(bytes, report); assert(record.width === size.width && record.height === size.height, 'Portrait dimensions'); }
-        else checkFbx(bytes, report);
+        if (binary[2].endsWith('.png')) {
+          if (binary[2] === 'portrait.png') assert(g.portraitReviewed === true, 'Portrait not reviewed');
+          const size = checkPng(bytes, report); assert(record.width === size.width && record.height === size.height, 'PNG dimensions');
+        } else checkFbx(bytes, report, human ? { mediaNames: ['fabric.png'] } : undefined);
         continue;
       }
       if (bytes.includes(0)) { report('unreviewed-binary'); continue; }
@@ -176,6 +210,15 @@ function selfTest() {
   const png = pngWith();
   const dirtyPng = pngWith([chunk('tEXt', Buffer.from('File\0private'))]);
   const fbx = data => { const header = Buffer.alloc(27); Buffer.from('Kaydara FBX Binary  \0\x1a\0', 'binary').copy(header); header.writeUInt32LE(7400, 23); const n = Buffer.alloc(14); n.writeUInt32LE(27 + 14 + data.length + 13); n.writeUInt32LE(1, 4); n.writeUInt32LE(data.length, 8); n[12] = 1; n[13] = 88; return Buffer.concat([header, n, data, Buffer.alloc(26)]); };
+  const namedFbx = (name, text, mediaContext = false) => {
+    const header = Buffer.alloc(27); Buffer.from('Kaydara FBX Binary  \0\x1a\0', 'binary').copy(header); header.writeUInt32LE(7400, 23);
+    const value = text === undefined ? Buffer.alloc(0) : Buffer.from(text), prop = text === undefined ? Buffer.alloc(0) : Buffer.alloc(value.length + 5);
+    if (prop.length) { prop[0] = 83; prop.writeUInt32LE(value.length, 1); value.copy(prop, 5); }
+    const parent = mediaContext ? Buffer.alloc(20) : Buffer.alloc(0), node = Buffer.alloc(13 + Buffer.byteLength(name));
+    node.writeUInt32LE(27 + parent.length + node.length + prop.length + 13); node.writeUInt32LE(prop.length ? 1 : 0, 4); node.writeUInt32LE(prop.length, 8); node[12] = Buffer.byteLength(name); node.write(name, 13);
+    if (mediaContext) { parent.writeUInt32LE(27 + parent.length + node.length + prop.length + 26); parent[12] = 7; parent.write('Texture', 13); }
+    return Buffer.concat([header, parent, node, prop, Buffer.alloc(mediaContext ? 39 : 26)]);
+  };
   const arr = (value, encode = raw => zlib.deflateSync(raw)) => { const raw = Buffer.from(value), compressed = encode(raw), b = Buffer.alloc(13); b[0] = 98; b.writeUInt32LE(raw.length, 1); b.writeUInt32LE(1, 5); b.writeUInt32LE(compressed.length, 9); return Buffer.concat([b, compressed]); };
   const generatorPath = 'tools/create-office-cast.py';
   const generator = Buffer.from('original generator'), source = { roleId: 'manager', provenance: { kind: 'original-procedural' } }, assetPath = 'game/assets/resources/office-cast/manager/portrait.png', manifestPath = assetPath.replace('portrait.png', 'manifest.json');
@@ -212,12 +255,64 @@ function selfTest() {
   check('fbx-compressed-secret', () => { const found = []; checkFbx(fbx(arr(privatePath)), c => found.push(c)); assert(found.includes('private-workspace-path')); });
   check('fbx-compressed-trailing-stream', () => assert.throws(() => checkFbx(fbx(arr('original', raw => Buffer.concat([zlib.deflateSync(raw), zlib.deflateSync(Buffer.from(privatePath))]))), () => {}), /compressed trailing data/));
   check('fbx-array-budget', () => { const excess = Buffer.from(arr('original')); excess.writeUInt32LE(0xffffffff, 1); assert.throws(() => checkFbx(fbx(excess), () => {})); });
+  check('fbx-v1-still-rejects-texture-node', () => assert.throws(() => checkFbx(namedFbx('Texture'), () => {}), /external media/));
+  check('fbx-v2-exact-relative-fabric', () => assert.doesNotThrow(() => checkFbx(namedFbx('RelativeFilename', 'fabric.png', true), () => {}, { mediaNames: ['fabric.png'] })));
+  check('fbx-v2-refuses-other-media-options', () => assert.throws(() => checkFbx(namedFbx('RelativeFilename', 'other.png'), () => {}, { mediaNames: ['other.png'] }), /declared human fabric/));
+  check('fbx-v2-refuses-escaping-media', () => assert.throws(() => checkFbx(namedFbx('Filename', '../fabric.png', true), () => {}, { mediaNames: ['fabric.png'] }), /exact declared relative/));
+  check('fbx-v2-refuses-absolute-media', () => assert.throws(() => checkFbx(namedFbx('Filename', 'C:/external/fabric.png', true), () => {}, { mediaNames: ['fabric.png'] }), /exact declared relative/));
+  check('fbx-v2-refuses-other-logical-media', () => assert.throws(() => checkFbx(namedFbx('Media', 'Other\0\x01Video'), () => {}, { mediaNames: ['fabric.png'] }), /media reference/));
+  check('fbx-v2-refuses-embedded-media', () => assert.throws(() => checkFbx(namedFbx('Content', 'original'), () => {}, { mediaNames: ['fabric.png'] }), /embedded media/));
+  check('fbx-v2-requires-texture-reference', () => assert.throws(() => checkFbx(fbx(arr('original')), () => {}, { mediaNames: ['fabric.png'] }), /texture reference missing/));
   check('manifest-required', () => assert(run(new Map([...view].filter(([k]) => k !== manifestPath))).length));
   check('generator-must-be-listed', () => assert(audit([...view.keys()].filter(k => k !== generatorPath), read(view)).some(f => f.file === assetPath && f.category.includes('Unlisted generator'))));
   check('source-generator-hash', () => assert(run(new Map(view).set(generatorPath, Buffer.from('changed generator'))).length));
   check('asset-magic', () => assert(run(new Map(view).set(assetPath, Buffer.from('wrong'))).length));
   check('binary-path-boundary', () => assert(run(new Map(view).set('private.png', png)).length));
   check('asset-hash', () => { const altered = structuredClone(manifest); altered.generated.outputs['portrait.png'].sha256 = '0'.repeat(64); assert(run(new Map(view).set(manifestPath, Buffer.from(JSON.stringify(altered)))).length); });
+  const humanSource = {
+    roleId: 'manager', assetRevision: 3, generatorVersion: 'office-human-2', rigSpecVersion: 'office-humanoid-29-v2', blenderVersion: '4.5.14 LTS',
+    provenance: { kind: 'cc0-derived', source: HUMAN_GENERATOR, author: 'Slap Duel project', license: 'CC0 base with project derivative' },
+    baseMesh: { ...HUMAN_BASE, authors: ['Dan Ulrich'] },
+    clothing: structuredClone(HUMAN_CLOTHING),
+    runtime: { boneCount: 29, identityMaterial: 8, materials: [...HUMAN_MATERIALS], restPose: 'human-a-rest-v2', uvStrategy: 'single-tile-atlas',
+      anchors: { palm: [0, .001, 0], cheekLeft: [.0012, .0007, .00145], cheekRight: [-.0012, .0007, .00145] } },
+  };
+  const humanGenerator = Buffer.from('human generator fixture'), humanBase = 'game/assets/resources/office-cast/manager/';
+  const humanFbx = namedFbx('RelativeFilename', 'fabric.png', true);
+  const humanManifest = { schemaVersion: 1, source: humanSource, generated: {
+    generatorSha256: sha(humanGenerator), sourceHash: sha(Buffer.concat([humanGenerator, Buffer.from(JSON.stringify(canonical(humanSource)))])), portraitReviewed: true,
+    mesh: { timelineFps: { fps: 60, fpsBase: 1 }, sourceClips: Array.from({ length: 13 }, () => ({ fps: 60, to: 15.1 })) },
+    convertedSkin: { animationFps: 60, animationDuration: 15.1 },
+    outputs: Object.fromEntries([['character.fbx', humanFbx], ['portrait.png', png], ['fabric.png', png]].map(([name, bytes]) => [name,
+      { path: humanBase + name, bytes: bytes.length, sha256: sha(bytes), ...(name.endsWith('.png') ? { width: 1, height: 1 } : {}) }])) } };
+  const humanView = new Map([[HUMAN_GENERATOR, humanGenerator], ['tools/human-asset-contract.mjs', Buffer.from('contract fixture')],
+    [manifestPath, Buffer.from(JSON.stringify(humanManifest))], [humanBase + 'character.fbx', humanFbx], [assetPath, png], [humanBase + 'fabric.png', png],
+    [humanBase + 'character.fbx.meta', Buffer.from(JSON.stringify({ userData: { animationImportSettings: [{ duration: 15.1 }] } }))]]);
+  const alterHuman = change => { const updated = structuredClone(humanManifest); change(updated); return new Map(humanView).set(manifestPath, Buffer.from(JSON.stringify(updated))); };
+  check('v2-public-fixed-derived-package', () => assert.deepEqual(run(humanView), []));
+  check('v2-public-refuses-24fps-scene', () => assert(run(alterHuman(m => m.generated.mesh.timelineFps.fps = 24)).length));
+  check('v2-public-refuses-37.75s-converted-timebase', () => assert(run(alterHuman(m => m.generated.convertedSkin.animationDuration = 37.75)).length));
+  check('v2-public-refuses-24fps-converted-sampler', () => assert(run(alterHuman(m => m.generated.convertedSkin.animationFps = 24)).length));
+  check('v2-public-refuses-37.75s-Creator-raw-timeline', () => {
+    const changed = new Map(humanView).set(humanBase + 'character.fbx.meta', Buffer.from(JSON.stringify({ userData: { animationImportSettings: [{ duration: 37.75 }] } })));
+    assert(run(changed).length);
+  });
+  check('v2-public-requires-import-timeline-metadata', () => assert(run(new Map([...humanView].filter(([name]) => name !== humanBase + 'character.fbx.meta'))).length));
+  check('v2-public-fixed-base-url', () => {
+    const changed = alterHuman(m => {
+      m.source.baseMesh.url = 'https://example.com/body.zip';
+      m.generated.sourceHash = sha(Buffer.concat([humanGenerator, Buffer.from(JSON.stringify(canonical(m.source)))]));
+    });
+    assert(run(changed).length);
+  });
+  check('v2-public-contract-must-be-listed', () => assert(run(new Map([...humanView].filter(([name]) => name !== 'tools/human-asset-contract.mjs'))).length));
+  check('v2-public-fabric-must-be-listed', () => assert(run(new Map([...humanView].filter(([name]) => name !== humanBase + 'fabric.png'))).length));
+  check('v2-public-other-texture-path', () => assert(run(new Map(humanView).set(humanBase + 'normal.png', png)).some(item => item.category === 'nonpublic-path')));
+  check('v2-public-generator-hash', () => assert(run(new Map(humanView).set(HUMAN_GENERATOR, Buffer.from('changed human generator'))).length));
+  check('v2-public-fabric-metadata', () => {
+    const changed = alterHuman(m => { const record = m.generated.outputs['fabric.png']; record.bytes = dirtyPng.length; record.sha256 = sha(dirtyPng); });
+    changed.set(humanBase + 'fabric.png', dirtyPng); assert(run(changed).some(item => item.file === humanBase + 'fabric.png' && item.category.startsWith('asset-validation:')));
+  });
   check('private-key-path', () => assert(audit(['private/file.key'], () => Buffer.from('')).length));
   check('service-token', () => { const found = []; scanText('ntn_' + 'x'.repeat(35), c => found.push(c)); assert(found.includes('service-token')); });
   console.log(JSON.stringify({ passed: true, scope: 'isolated-public-asset-fixtures', checks: passed.length, cases: passed }));

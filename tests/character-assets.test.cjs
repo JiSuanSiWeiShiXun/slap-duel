@@ -6,6 +6,7 @@ const crypto = require('node:crypto');
 const { pathToFileURL } = require('node:url');
 const root = path.resolve(__dirname, '..');
 const api = import(pathToFileURL(path.join(root, 'tools/check-character-assets.mjs')).href);
+const humanApi = import(pathToFileURL(path.join(root, 'tools/human-asset-contract.mjs')).href);
 const fixtures = path.join(root, 'game/local/asset-rebuild');
 function removeFixture(dir) {
   const absolute = path.resolve(dir);
@@ -15,13 +16,16 @@ function removeFixture(dir) {
 function fixture(t) {
   fs.mkdirSync(fixtures, { recursive: true });
   const dir = fs.mkdtempSync(path.join(fixtures, 'test-'));
+  t.after(() => removeFixture(dir));
   for (const role of ['manager', 'veteran', 'rookie']) {
     const relative = `game/assets/resources/office-cast/${role}`;
     fs.mkdirSync(path.join(dir, relative), { recursive: true });
-    for (const name of ['manifest.json', 'character.fbx', 'character.fbx.meta', 'portrait.png', 'portrait.png.meta'])
+    const manifest = JSON.parse(fs.readFileSync(path.join(root, relative, 'manifest.json')));
+    const outputs = Object.keys(manifest.generated.outputs);
+    const copied = ['manifest.json', 'character.fbx.meta', ...outputs, ...outputs.filter(name => name.endsWith('.png')).map(name => `${name}.meta`)];
+    for (const name of copied)
       fs.copyFileSync(path.join(root, relative, name), path.join(dir, relative, name));
   }
-  t.after(() => removeFixture(dir));
   return dir;
 }
 function mutate(dir, role, fn, name = 'manifest.json') {
@@ -29,7 +33,7 @@ function mutate(dir, role, fn, name = 'manifest.json') {
   const value = JSON.parse(fs.readFileSync(file, 'utf8')); fn(value);
   fs.writeFileSync(file, JSON.stringify(value));
 }
-test('three actual original roles validate independently with stable imports', async t => {
+test('three actual admitted role lineages validate independently with stable imports', async t => {
   const { validateCast } = await api;
   const result = validateCast(fixture(t));
   assert.deepEqual(result.map(r => r.roleId), ['manager', 'veteran', 'rookie']);
@@ -42,6 +46,10 @@ for (const [name, role, fn, file] of [
   ['role mismatch', 'manager', m => m.source.roleId = 'rookie'],
   ['bad inverse bindings', 'manager', m => m.generated.convertedSkin.inverseBindMatrices = 0],
   ['invalid normalized weights', 'manager', m => m.generated.convertedSkin.maxWeightError = 0.1],
+  ['24 FPS scene timebase', 'manager', m => m.generated.mesh.timelineFps.fps = 24],
+  ['37.75 second converted timeline', 'manager', m => m.generated.convertedSkin.animationDuration = 37.75],
+  ['24 FPS converted timeline', 'manager', m => m.generated.convertedSkin.animationFps = 24],
+  ['37.75 second Creator raw timeline', 'manager', m => m.userData.animationImportSettings[0].duration = 37.75, 'character.fbx.meta'],
   ['invalid clip interval', 'manager', m => m.generated.mesh.sourceClips[4].to += 0.01],
   ['import split mismatch', 'manager', m => m.userData.animationImportSettings[0].splits[0].to = 99, 'character.fbx.meta'],
 ]) test(`rejects ${name}`, async t => {
@@ -103,4 +111,116 @@ test('rejects a junction before traversal or write', async t => {
   assert.throws(() => safePath(root, path.join(dir, 'link/public')), /link|junction/i);
   fs.symlinkSync(path.dirname(root), path.join(dir, 'escape'), 'junction');
   assert.throws(() => safePath(root, path.join(dir, 'escape/outside')), /link|junction/i);
+});
+
+async function humanSourceFixture() {
+  const { HUMAN_BASE, HUMAN_CLOTHING, HUMAN_MATERIALS } = await humanApi;
+  return { roleId: 'manager', assetRevision: 3, generatorVersion: 'office-human-2', rigSpecVersion: 'office-humanoid-29-v2', blenderVersion: '4.5.14 LTS',
+    provenance: { kind: 'cc0-derived', source: 'tools/create-office-human.py', author: 'Slap Duel project', license: 'CC0 base with project derivative' },
+    baseMesh: { ...HUMAN_BASE, authors: ['Dan Ulrich'] },
+    clothing: structuredClone(HUMAN_CLOTHING),
+    runtime: { boneCount: 29, identityMaterial: 8, materials: [...HUMAN_MATERIALS], restPose: 'human-a-rest-v2', uvStrategy: 'single-tile-atlas',
+      anchors: { palm: [0, .0007, 0], cheekLeft: [.0012, .0004, .0015], cheekRight: [-.0012, .0004, .0015] } } };
+}
+test('v2 declaration admits only the fixed CC0 base and explicit runtime contract', async () => {
+  const { validateHumanSource } = await humanApi;
+  const source = await humanSourceFixture();
+  assert.doesNotThrow(() => validateHumanSource(source, 'manager'));
+  // The fixture tests declarations only, not the existence/appearance of a model.
+});
+for (const [name, change] of [
+  ['foreign source URL', s => s.baseMesh.url = 'https://example.com/body.zip'],
+  ['foreign source archive', s => s.baseMesh.archiveSha256 = '0'.repeat(64)],
+  ['foreign blend', s => s.baseMesh.blendSha256 = '0'.repeat(64)],
+  ['other selected object', s => s.baseMesh.object = 'GEO-body_male_stylized'],
+  ['missing author', s => s.baseMesh.authors = []],
+  ['missing CC0 license', s => s.baseMesh.license = 'unknown'],
+  ['foreign clothing URL', s => s.clothing.url = 'https://example.com/suit.zip'],
+  ['foreign clothing archive', s => s.clothing.archiveSha256 = '0'.repeat(64)],
+  ['foreign clothing mesh', s => s.clothing.objSha256 = '0'.repeat(64)],
+  ['foreign clothing texture', s => s.clothing.textureSha256 = '0'.repeat(64)],
+  ['other clothing object', s => s.clothing.object = 'other.obj'],
+  ['missing clothing CC0', s => s.clothing.license = 'unknown'],
+  ['missing clothing author', s => s.clothing.authors = []],
+  ['false original claim', s => s.provenance.kind = 'original-procedural'],
+  ['unknown generator', s => s.provenance.source = 'tools/other.py'],
+  ['other role', s => s.roleId = 'rookie'],
+  ['old rig under new lineage', s => s.rigSpecVersion = 'office-humanoid-29-v1'],
+  ['wrong joint contract', s => s.runtime.boneCount = 28],
+  ['wrong identity slot', s => s.runtime.identityMaterial = 1],
+  ['old rest strategy', s => s.runtime.restPose = 'legacy-t-pose'],
+  ['multi-tile UV strategy', s => s.runtime.uvStrategy = 'source-udim'],
+  ['wrong material meaning', s => s.runtime.materials[8] = 'skin'],
+  ['missing palm', s => delete s.runtime.anchors.palm],
+  ['zero palm', s => s.runtime.anchors.palm = [0, 0, 0]],
+  ['nonfinite anchor', s => s.runtime.anchors.palm[1] = Infinity],
+  ['oversized anchor', s => s.runtime.anchors.palm[1] = 5],
+  ['wrong cheek side', s => s.runtime.anchors.cheekRight[0] *= -1],
+  ['different cheek heights', s => s.runtime.anchors.cheekRight[1] += .001],
+]) test(`v2 declaration rejects ${name}`, async () => {
+  const { validateHumanSource } = await humanApi, source = await humanSourceFixture();
+  change(source); assert.throws(() => validateHumanSource(source, 'manager'));
+});
+test('v2 output inventory rejects extra images, missing fabric and undeclared paths', async () => {
+  const { validateHumanOutputs } = await humanApi;
+  const generated = { outputs: { 'character.fbx': {}, 'portrait.png': {}, 'fabric.png': {} } };
+  assert.doesNotThrow(() => validateHumanOutputs(generated));
+  for (const changed of [
+    { outputs: { ...generated.outputs, 'other.png': {} } },
+    { outputs: { 'character.fbx': {}, 'portrait.png': {} } },
+    { outputs: { ...generated.outputs, '../fabric.png': {} } },
+  ]) assert.throws(() => validateHumanOutputs(changed));
+});
+async function humanMeshFixture() {
+  const { HUMAN_BONES, HUMAN_MATERIALS } = await humanApi;
+  return { vertices: 100, timelineFps: { fps: 60, fpsBase: 1 }, semanticWeightAudit: { lowerBodyVertices: 40, misassignedLowerBody: 0 }, boneNames: [...HUMAN_BONES], materialNames: [...HUMAN_MATERIALS], materialCount: 9, baseObject: 'GEO-body_male_realistic', restPose: 'human-a-rest-v2', uvStrategy: 'single-tile-atlas', uvAtlas: { layers: 1, tileCount: 1, min: [0, 0], max: [1, 1] },
+    restJoints: Object.fromEntries(HUMAN_BONES.map((name, i) => [name, { head: [i * .01, 0, 0], tail: [i * .01, .1, 0], parent: name === 'Root' ? null : 'Root' }])) };
+}
+test('v2 mesh declarations require actual rest inventory, no cycles, material slots and one bounded atlas', async () => {
+  const { validateHumanMeshContract } = await humanApi, mesh = await humanMeshFixture();
+  assert.doesNotThrow(() => validateHumanMeshContract(mesh));
+  for (const change of [
+    m => delete m.restJoints.Head,
+    m => m.restJoints.Head.parent = 'Head',
+    m => { m.restJoints.Head.parent = 'Neck'; m.restJoints.Neck.parent = 'Head'; },
+    m => m.restJoints.Head.tail = m.restJoints.Head.head,
+    m => m.restJoints.Head.head[0] = NaN,
+    m => m.boneNames[0] = 'Other',
+    m => m.materialNames[8] = 'skin',
+    m => m.uvAtlas.tileCount = 24,
+    m => m.uvAtlas.max = [4, 6],
+    m => m.uvAtlas.min = m.uvAtlas.max,
+  ]) { const changed = structuredClone(mesh); change(changed); assert.throws(() => validateHumanMeshContract(changed)); }
+});
+
+test('v2 rejects the actual 24 FPS to 37.75 second export regression at every timeline boundary', async () => {
+  const { validateHumanTimelineContract } = await humanApi;
+  const mesh = { timelineFps: { fps: 60, fpsBase: 1 }, sourceClips: Array.from({ length: 13 }, () => ({ fps: 60, to: 15.1 })) };
+  const skin = { animationDuration: 15.1, animationFps: 60 };
+  assert.doesNotThrow(() => validateHumanTimelineContract(mesh, skin, 15.1));
+  assert.doesNotThrow(() => validateHumanTimelineContract(mesh, { ...skin, animationDuration: 15.1 - 1 / 60 }, 15.1 + 1 / 60));
+  for (const [changedMesh, changedSkin, raw] of [
+    [{ ...mesh, timelineFps: { fps: 24, fpsBase: 1 } }, skin, 15.1],
+    [{ ...mesh, timelineFps: { fps: 60, fpsBase: 1.001 } }, skin, 15.1],
+    [{ ...mesh, timelineFps: undefined }, skin, 15.1],
+    [mesh, { ...skin, animationDuration: 37.75 }, 15.1],
+    [mesh, { ...skin, animationFps: 24 }, 15.1],
+    [mesh, { ...skin, animationDuration: undefined }, 15.1],
+    [mesh, { ...skin, animationDuration: NaN }, 15.1],
+    [mesh, skin, 37.75], [mesh, skin, undefined], [mesh, skin, Infinity],
+    [mesh, skin, 15.1 + 2 / 60], [mesh, { ...skin, animationDuration: 15.1 - 2 / 60 }, 15.1],
+    [{ ...mesh, sourceClips: [{ fps: 60, to: 37.75 }] }, { animationDuration: 37.75, animationFps: 60 }, 37.75],
+  ]) assert.throws(() => validateHumanTimelineContract(changedMesh, changedSkin, raw));
+});
+test('v2 lower-body semantic weights require a real sample and zero arm/hand assignments', async () => {
+  const { validateHumanMeshContract } = await humanApi, mesh = await humanMeshFixture();
+  assert.doesNotThrow(() => validateHumanMeshContract(mesh));
+  for (const change of [
+    m => delete m.semanticWeightAudit,
+    m => m.semanticWeightAudit.lowerBodyVertices = 0,
+    m => m.semanticWeightAudit.lowerBodyVertices = 101,
+    m => m.semanticWeightAudit.lowerBodyVertices = 40.5,
+    m => m.semanticWeightAudit.misassignedLowerBody = 1,
+    m => m.semanticWeightAudit.misassignedLowerBody = -1,
+  ]) { const changed = structuredClone(mesh); change(changed); assert.throws(() => validateHumanMeshContract(changed)); }
 });

@@ -1,12 +1,15 @@
 import { Node, Prefab, instantiate, SkeletalAnimation, SkinnedMeshRenderer, AnimationState, Vec3, Quat, Layers, Color } from 'cc';
 import { BattleState } from './core/Battle';
 import { Point, HandId } from './ParryMotion';
-import { CharacterSample, characterContacts, solveTwoBone, ArmSolution, ContactAnchors } from './CharacterTimeline';
+import { CharacterSample, characterContacts, solveTwoBone, ArmSolution, ContactAnchors, CharacterStaging, presentationSide } from './CharacterTimeline';
 
 export type RoleId = 'manager' | 'veteran' | 'rookie';
 export interface CastManifest {
   schemaVersion: number;
   source: { roleId: RoleId; displayName: string; facets: {positive: string; negative: string};
+    rigSpecVersion: string; generatorVersion: string;
+    runtime?: {boneCount: number; identityMaterial: number; materials: readonly string[]; restPose: string;
+      anchors: {palm: Point; cheekLeft: Point; cheekRight: Point}};
     appearance: {cloth: string; outfit: string}; proportions: {height: number; arm: number};
     motionProfile: {energy: number; slouch: number; chin: number; lean: number; smirk: number} };
   generated: {sourceHash: string; imports: {prefabUuid: string; skeletonUuid: string; portraitTextureUuid: string;
@@ -14,40 +17,88 @@ export interface CastManifest {
 }
 interface Actor {
   root: Node; animation: SkeletalAnimation; bones: Record<string,Node>; renderers: SkinnedMeshRenderer[];
-  manifest: CastManifest; side: 0|1; states: Map<string,AnimationState>; clip: string;
+  manifest: CastManifest; actorId: 0|1; side: 0|1; states: Map<string,AnimationState>; clip: string;
+  contract: RuntimeContract;
+  staging: CharacterStaging;
+  bind: Record<string,{position:Vec3;rotation:Quat}>;
   palm: Record<HandId,Vec3>; cheek: Vec3; contacts: Partial<Record<HandId,ArmSolution & {actualError: number}>>;
   outcome: CharacterSample['outcome']; resultProgress: number;
   resultStart: { root: Vec3; bones: Record<string,{position: Vec3; rotation: Quat}> } | null;
 }
 const point = (v: Readonly<Vec3>): Point => [v.x,v.y,v.z];
+interface RuntimeContract { readonly palm: Point; readonly cheekLeft: Point; readonly cheekRight: Point; readonly identityMaterial: number; readonly materials: number; }
+const HUMAN_MATERIALS = ['Skin','Coat','Shirt','Trousers','Hair','Iris','Sclera','Leather','Identity'];
+function runtimeContract(manifest: CastManifest): RuntimeContract {
+  if (manifest.source.rigSpecVersion === 'office-humanoid-29-v1' && manifest.source.generatorVersion === 'office-cast-1') {
+    return {palm:[0,.00095,0],cheekLeft:[.0018,.0022,.0016],cheekRight:[-.0018,.0022,.0016],identityMaterial:1,materials:4};
+  }
+  const r=manifest.source.runtime;
+  if (manifest.source.rigSpecVersion !== 'office-humanoid-29-v2' || manifest.source.generatorVersion !== 'office-human-2'
+    || !r || r.boneCount!==29 || r.identityMaterial!==8 || r.restPose!=='human-a-rest-v2'
+    || r.materials?.length!==HUMAN_MATERIALS.length || r.materials.some((name,i)=>name!==HUMAN_MATERIALS[i])) throw new Error('Unsupported character runtime contract');
+  for (const name of ['palm','cheekLeft','cheekRight'] as const) {
+    const value=r.anchors?.[name];
+    if (!Array.isArray(value)||value.length!==3||value.some(v=>!Number.isFinite(v)||Math.abs(v)>.01)||Math.hypot(...value)<.00001) throw new Error('Invalid human contact anchor');
+  }
+  if (r.anchors.cheekLeft[0]!==-r.anchors.cheekRight[0] || r.anchors.cheekLeft[1]!==r.anchors.cheekRight[1] || r.anchors.cheekLeft[2]!==r.anchors.cheekRight[2]) throw new Error('Asymmetric human cheek anchors');
+  return {palm:r.anchors.palm,cheekLeft:r.anchors.cheekLeft,cheekRight:r.anchors.cheekRight,identityMaterial:r.identityMaterial,materials:r.materials.length};
+}
 
 /** Sole owner of instantiated skins. Shared Prefab/Texture templates belong to the loader. */
 export class CharacterView {
   private actors: Actor[]=[];
   private newSample=false;
   get count(): number { return this.actors.length; }
+  clipDuration(name: string): number { const state=this.actors[0]?.states.get(name); if(!state) throw new Error('Unknown preview clip'); return state.duration; }
+
+  /** Source-clip inspection only. No Battle is created, sampled or commanded. */
+  preview(name: string, normalizedTime: number): void {
+    if(!Number.isFinite(normalizedTime)||normalizedTime<0||normalizedTime>1) throw new Error('Invalid preview time');
+    for(const a of this.actors) {
+      const state=a.states.get(name); if(!state) throw new Error('Unknown preview clip');
+      for(const [boneName,bone] of Object.entries(a.bones)) {bone.setPosition(a.bind[boneName].position);bone.setRotation(a.bind[boneName].rotation);}
+      if(a.clip!==name) {a.animation.stop();a.animation.play(name);state.pause();a.clip=name;}
+      state.setTime(normalizedTime*state.duration);state.sample();a.root.setPosition(a.staging.baseX,0,0);
+      a.contacts={};a.outcome=null;a.resultProgress=0;a.resultStart=null;
+    }
+    this.newSample=true;
+  }
+  observePreview(): void {
+    if(this.actors.length!==2||!this.newSample) return;
+    const chest=this.actors.find(a=>a.side===1)!.bones.Chest,q=chest.rotation;chest.setRotation(new Quat(q.x,-q.y,-q.z,q.w));
+    this.newSample=false;
+    for(const a of this.actors) {
+      Vec3.transformMat4(a.cheek,new Vec3(...(a.side===0?a.contract.cheekLeft:a.contract.cheekRight)),a.bones.Head.worldMatrix);
+      this.readPalm(a,'lead');this.readPalm(a,'rear');
+    }
+  }
 
   clear(): void {
     this.newSample=false;
     for (const a of this.actors) { a.root.active=false; a.animation.stop(); a.root.destroy(); }
     this.actors=[];
   }
-  prepare(parent: Node, manifests: readonly CastManifest[], templates: readonly Prefab[]): void {
+  prepare(parent: Node, manifests: readonly CastManifest[], templates: readonly Prefab[], playerStation: 0|1 = 0): void {
     this.clear();
     try {
-      for (const side of [0,1] as const) {
-        const manifest=manifests[side], root=instantiate(templates[side]);
+      for (const actorId of [0,1] as const) {
+        const side=presentationSide(actorId,playerStation);
+        const manifest=manifests[actorId], contract=runtimeContract(manifest), root=instantiate(templates[actorId]);
         root.active=false; parent.addChild(root);
-        root.setPosition(side===0?-.55:.55,0,0); root.setRotationFromEuler(0,side===0?25:-25,0);
+        const stance=manifests.some(m=>m.source.rigSpecVersion==='office-humanoid-29-v2')?.38:.55;
+        const staging: CharacterStaging={baseX:side===0?-stance:stance,side,...(manifest.source.rigSpecVersion==='office-humanoid-29-v2'?{motionScale:.67}:{})};
+        const facing=manifest.source.rigSpecVersion==='office-humanoid-29-v2'?50:25;
+        root.setPosition(staging.baseX,0,0); root.setRotationFromEuler(0,side===0?facing:-facing,0);
         const animation=root.getComponent(SkeletalAnimation)||root.getComponentInChildren(SkeletalAnimation);
         const renderers=root.getComponentsInChildren(SkinnedMeshRenderer);
-        if (!animation || !renderers.length || renderers.some(r=>!r.mesh||!r.skeleton||r.skeleton.joints.length!==29)) { root.destroy(); throw new Error('Character has no valid29-joint skin'); }
+        if (!animation || renderers.length!==1 || renderers.some(r=>!r.mesh||!r.skeleton||r.skeleton.joints.length!==29||r.sharedMaterials.length!==contract.materials)) { root.destroy(); throw new Error('Character skin/material contract mismatch'); }
         // Configure BEFORE first activation/onLoad creates animation states.
         animation.useBakedAnimation=false; root.active=true;
-        const actor: Actor={root,animation,renderers,manifest,side,bones:{},states:new Map(),clip:'',palm:{lead:new Vec3(),rear:new Vec3()},cheek:new Vec3(),contacts:{},outcome:null,resultProgress:0,resultStart:null};
+        const actor: Actor={root,animation,renderers,manifest,contract,staging,bind:{},actorId,side,bones:{},states:new Map(),clip:'',palm:{lead:new Vec3(),rear:new Vec3()},cheek:new Vec3(),contacts:{},outcome:null,resultProgress:0,resultStart:null};
         this.actors.push(actor);
         for (const [name,path] of Object.entries(manifest.generated.imports.bonePaths)) {
           const bone=root.getChildByPath(path); if(!bone) throw new Error(`Character bone missing: ${name}`); actor.bones[name]=bone;
+          actor.bind[name]={position:bone.position.clone(),rotation:bone.rotation.clone()};
         }
         for (const name of Object.keys(manifest.generated.imports.clipUuids)) {
           const state=animation.getState(name); if(!state) throw new Error(`Character clip missing: ${name}`); actor.states.set(name,state);
@@ -56,7 +107,7 @@ export class CharacterView {
         for (const renderer of renderers) {
           renderer.node.layer=Layers.Enum.DEFAULT;
           // Rookie material1 is the badge stripe; material2 also owns eye whites/highlights.
-          renderer.getMaterialInstance(1)?.setProperty('mainColor',new Color(side===0?'#73C5D5':'#E6A17A'));
+          renderer.getMaterialInstance(contract.identityMaterial)?.setProperty('mainColor',new Color(actorId===0?'#73C5D5':'#E6A17A'));
         }
       }
     } catch(error) { this.clear(); throw error; }
@@ -65,7 +116,7 @@ export class CharacterView {
   /** Called in Component.update, before the engine applies its animation blend buffer. */
   sample(samples: readonly CharacterSample[]): void {
     for (const a of this.actors) {
-      const sample=samples[a.side], state=a.states.get(sample.semanticClip);
+      const sample=samples[a.actorId], state=a.states.get(sample.semanticClip);
       if(!state) throw new Error(`Required combat clip not loaded: ${sample.semanticClip}`);
       if (sample.outcome && !a.resultStart) {
         // Capture the last rendered deform pose, including IK, before sampling the result clip.
@@ -74,9 +125,15 @@ export class CharacterView {
         a.resultStart={root:a.root.position.clone(),bones};
       }
       a.outcome=sample.outcome; a.resultProgress=sample.resultProgress;
+      // Importers can omit constant bind-pose channels. Restore their baseline
+      // before sampling so last frame's lateUpdate IK cannot leak into a clip.
+      if(a.manifest.source.rigSpecVersion==='office-humanoid-29-v2') for(const [name,bone] of Object.entries(a.bones)) {
+        bone.setPosition(a.bind[name].position); bone.setRotation(a.bind[name].rotation);
+      }
       if(a.clip!==sample.semanticClip) { a.animation.stop(); a.animation.play(sample.semanticClip); state.pause(); a.clip=sample.semanticClip; }
       state.setTime(sample.normalizedTime*state.duration); state.sample();
-      const rootTarget=new Vec3((a.side===0?-.55:.55)+(a.side===0?1:-1)*sample.lunge,0,0);
+      const lungeScale=a.manifest.source.rigSpecVersion==='office-humanoid-29-v2'?.63:1;
+      const rootTarget=new Vec3(a.staging.baseX+(a.side===0?1:-1)*sample.lunge*lungeScale,0,0);
       const t=sample.resultProgress, blend=t*t*(3-2*t);
       a.root.setPosition(a.resultStart?Vec3.lerp(new Vec3(),a.resultStart.root,rootTarget,blend):rootTarget);
     }
@@ -85,7 +142,7 @@ export class CharacterView {
   private handBone(a: Actor, hand: HandId): Node {
     const side=hand==='lead'?(a.side===0?'L':'R'):(a.side===0?'R':'L'); return a.bones[`Hand.${side}`];
   }
-  private readPalm(a: Actor,hand: HandId): void { Vec3.transformMat4(a.palm[hand],new Vec3(0,.00095,0),this.handBone(a,hand).worldMatrix); }
+  private readPalm(a: Actor,hand: HandId): void { Vec3.transformMat4(a.palm[hand],new Vec3(...a.contract.palm),this.handBone(a,hand).worldMatrix); }
 
   private settleResult(a: Actor): void {
     if(!a.resultStart) return;
@@ -109,7 +166,8 @@ export class CharacterView {
     const shoulder=upper.worldPosition.clone(), elbow=fore.worldPosition.clone(), end=wrist.worldPosition.clone();
     // Height is already baked into translations; measure the actual matrix-scaled palm offset.
     this.readPalm(a,hand); const offset=Vec3.distance(a.palm[hand],end);
-    const solved=solveTwoBone(point(shoulder),Vec3.distance(shoulder,elbow),Vec3.distance(elbow,end),palm,offset);
+    const human=a.manifest.source.rigSpecVersion==='office-humanoid-29-v2';
+    const solved=solveTwoBone(point(shoulder),Vec3.distance(shoulder,elbow),Vec3.distance(elbow,end),palm,offset,human?[0,-.5,1]:undefined);
     const orient=(bone: Node,target: Point)=>{
       const up=Vec3.subtract(new Vec3(),new Vec3(...target),bone.worldPosition).normalize();
       const normal=new Vec3(0,0,side==='L'?1:-1);
@@ -127,27 +185,30 @@ export class CharacterView {
     // Re-solving an already corrected guard on a paused frame would creep toward its target.
     if(this.actors.length!==2 || !this.newSample) return;
     if(this.newSample) {
-      const chest=this.actors[1].bones.Chest,q=chest.rotation; chest.setRotation(new Quat(q.x,-q.y,-q.z,q.w));
+      const chest=this.actors.find(a=>a.side===1)!.bones.Chest,q=chest.rotation; chest.setRotation(new Quat(q.x,-q.y,-q.z,q.w));
       this.newSample=false;
     }
     if(state.result) for(const a of this.actors) this.settleResult(a);
     for(const a of this.actors) {
-      Vec3.transformMat4(a.cheek,new Vec3((a.side===0?1:-1)*.0018,.0022,.0016),a.bones.Head.worldMatrix);
+      Vec3.transformMat4(a.cheek,new Vec3(...(a.side===0?a.contract.cheekLeft:a.contract.cheekRight)),a.bones.Head.worldMatrix);
       this.readPalm(a,'lead'); this.readPalm(a,'rear'); a.contacts={};
     }
-    const anchors=this.actors.map(a=>({root:point(a.root.worldPosition),cheek:point(a.cheek),leadPalm:point(a.palm.lead),rearPalm:point(a.palm.rear)})) as [ContactAnchors,ContactAnchors];
+    const anchors=this.actors.map(a=>({root:point(a.root.worldPosition),cheek:point(a.cheek),leadPalm:point(a.palm.lead),rearPalm:point(a.palm.rear),staging:a.staging})) as [ContactAnchors,ContactAnchors];
     const targets=characterContacts(state,anchors);
     for(const a of this.actors) for(const hand of ['lead','rear'] as const) {
-      const target=targets[a.side][hand]; if(target) this.solveArm(a,hand,target);
+      const target=targets[a.actorId][hand]; if(target) this.solveArm(a,hand,target);
     }
   }
   measurements() { return this.actors.map(a=>({leadPalm:point(a.palm.lead),rearPalm:point(a.palm.rear),cheek:point(a.cheek),head:point(a.bones.Head.worldPosition)})); }
   evidence() {
-    return this.actors.map(a=>({roleId:a.manifest.source.roleId,sourceHash:a.manifest.generated.sourceHash,
+    return this.actors.map(a=>({actorId:a.actorId,station:a.side,roleId:a.manifest.source.roleId,sourceHash:a.manifest.generated.sourceHash,
       prefabUuid:a.manifest.generated.imports.prefabUuid,skeletonUuid:a.manifest.generated.imports.skeletonUuid,
       skinnedRenderers:a.renderers.length,joints:Object.keys(a.bones).length,clip:a.clip,useBakedAnimation:a.animation.useBakedAnimation,
-      sampledTime:a.states.get(a.clip)?.time??null,motionProfile:a.manifest.source.motionProfile,identityMaterial:1,contacts:a.contacts,
+      sampledTime:a.states.get(a.clip)?.time??null,motionProfile:a.manifest.source.motionProfile,identityMaterial:a.contract.identityMaterial,
+      rigSpecVersion:a.manifest.source.rigSpecVersion,materialCount:a.contract.materials,contactAnchors:a.contract,staging:a.staging,contacts:a.contacts,
+      geometry:['L','R'].map(side=>({side,shoulder:point(a.bones['UpperArm.'+side].worldPosition),elbow:point(a.bones['Forearm.'+side].worldPosition),wrist:point(a.bones['Hand.'+side].worldPosition),
+        upperLength:Vec3.distance(a.bones['UpperArm.'+side].worldPosition,a.bones['Forearm.'+side].worldPosition),foreLength:Vec3.distance(a.bones['Forearm.'+side].worldPosition,a.bones['Hand.'+side].worldPosition)})),
       outcome:a.outcome,resultProgress:a.resultProgress,resultTransitionCaptured:a.resultStart!==null,
-      actual:{...this.measurements()[a.side],pelvis:point(a.bones.Pelvis.worldPosition),root:point(a.root.worldPosition)}}));
+      actual:{...this.measurements()[a.actorId],pelvis:point(a.bones.Pelvis.worldPosition),root:point(a.root.worldPosition)}}));
   }
 }

@@ -2,15 +2,15 @@
   "schemaVersion": 1,
   "source": {
     "roleId": "manager",
-    "assetRevision": 2,
-    "rigSpecVersion": "office-humanoid-29-v1",
-    "generatorVersion": "office-cast-1",
+    "assetRevision": 3,
+    "rigSpecVersion": "office-humanoid-29-v2",
+    "generatorVersion": "office-human-2",
     "blenderVersion": "4.5.14 LTS",
     "provenance": {
-      "kind": "original-procedural",
+      "kind": "cc0-derived",
       "author": "Slap Duel project",
-      "license": "Project original assets; editable generation source included",
-      "source": "tools/create-office-cast.py"
+      "license": "CC0 human base; original office customization and production source included",
+      "source": "tools/create-office-human.py"
     },
     "guardHand": "lead",
     "counterHand": "rear",
@@ -27,8 +27,9 @@
     },
     "portrait": {
       "size": 512,
-      "samples": 20,
-      "pose": "intro-positive"
+      "samples": 24,
+      "pose": "intro-positive",
+      "framing": "waist-up-v2"
     },
     "displayName": "职场中层",
     "facets": {
@@ -40,44 +41,109 @@
       "hair": "swept",
       "glasses": false,
       "badge": false,
-      "skin": "#D7A17F",
-      "cloth": "#35516D",
-      "shirt": "#E7E3D8",
-      "dark": "#292735"
+      "skin": "#C99B80",
+      "cloth": "#293C55",
+      "shirt": "#E8E8E1",
+      "dark": "#242A34"
     },
     "proportions": {
       "height": 1,
-      "shoulder": 1.05,
-      "waist": 1.12,
-      "head": 1,
+      "shoulder": 1,
+      "waist": 1.09,
+      "head": 1.035,
       "arm": 1
     },
     "motionProfile": {
       "energy": 0.35,
-      "slouch": 0,
+      "slouch": 0.0,
       "chin": 0.055,
-      "lean": 0,
+      "lean": 0.0,
       "smirk": 0.035
+    },
+    "baseMesh": {
+      "version": "1.4.1",
+      "url": "https://download.blender.org/demo/asset-bundles/human-base-meshes/human-base-meshes-bundle-v1.4.1.zip",
+      "archiveSha256": "811f43accbb31a88266d932f8f5563b2d13586fca0ba2693aad1f5fe582b3515",
+      "blendSha256": "3c121505651140ceb4d69fd1d8923f7788ffadd81672f5be14845a5f2c75c137",
+      "object": "GEO-body_male_realistic",
+      "authors": [
+        "Dan Ulrich"
+      ],
+      "license": "CC0"
+    },
+    "clothing": {
+      "version": "suits01-cc0",
+      "url": "https://files2.makehumancommunity.org/asset_packs/suits01/suits01_cc0.zip",
+      "archiveSha256": "2b1d8676f3863b188e9eea98c1d8f234543d54c440e791d92b819f8ee1861f19",
+      "object": "clothes/toigo_male_suit_3/suit3.obj",
+      "objSha256": "1412a998988f19696e00637afd69e64499d727a0c6ab7527f8713129990f0e43",
+      "textureSha256": "7a3fa6cf10d3fcc2946469efcf066e2f5898d1a9dfa10a3df4a1ff2495dc17dc",
+      "authors": [
+        "MRT"
+      ],
+      "license": "CC0"
+    },
+    "runtime": {
+      "boneCount": 29,
+      "identityMaterial": 8,
+      "anchors": {
+        "palm": [
+          0,
+          0.001,
+          0
+        ],
+        "cheekLeft": [
+          0.0012,
+          0.0007,
+          0.00145
+        ],
+        "cheekRight": [
+          -0.0012,
+          0.0007,
+          0.00145
+        ]
+      },
+      "materials": [
+        "Skin",
+        "Coat",
+        "Shirt",
+        "Trousers",
+        "Hair",
+        "Iris",
+        "Sclera",
+        "Leather",
+        "Identity"
+      ],
+      "uvStrategy": "single-tile-atlas",
+      "restPose": "human-a-rest-v2"
     }
   },
   "generated": {
-    "generatorSha256": "abd8f3d38e0735c59e427cae2bca1c3436cb72aa1415e07f4b3a55407630711e",
-    "sourceHash": "b15f0eb6c5e925308dbaf3c3e2385cb17823adaadcfae367691a55a0d1887b8e",
-    "portraitReviewed": true,
+    "generatorSha256": "ba4a5059f96fa12ec97583730625c1475598e81ff5bec138942efecb2efa2ecb",
+    "sourceHash": "4f1fba57132b032e0b68d7a2ffca57b7c50a6a373dfcfab57d33347a91e3b165",
+    "portraitReviewed": false,
     "outputs": {
       "character.fbx": {
         "path": "game/assets/resources/office-cast/manager/character.fbx",
-        "bytes": 1727372,
-        "sha256": "29b59c61ea8d414faabc8cb9ed226dcd02b3fe76b027cdab7f8b6188fec3b150",
+        "bytes": 2659046,
+        "sha256": "9dd811807a703cddfd5ea8845e5d23ff305aa876b3bf106c8b8039d76a4509c7",
         "format": "FBX7400"
       },
       "portrait.png": {
         "path": "game/assets/resources/office-cast/manager/portrait.png",
-        "bytes": 167494,
-        "sha256": "37a655d5325092394d216ca27e4470b49a65458cf69f2fac19361746c8d64d9c",
+        "bytes": 195889,
+        "sha256": "ce354b4765077ddc0046ceb65a69d4b9b68daf991161ba0e0cbb337ee7e35192",
         "format": "PNG-RGBA8",
         "width": 512,
         "height": 512
+      },
+      "fabric.png": {
+        "path": "game/assets/resources/office-cast/manager/fabric.png",
+        "bytes": 652861,
+        "sha256": "59136afafd0ae551ca8bcc3ca52e15c1285f96f6cf84fbc9a7f8938f84203085",
+        "format": "PNG-RGBA8",
+        "width": 1024,
+        "height": 1024
       }
     },
     "mesh": {
@@ -113,18 +179,18 @@
         "Toe.R"
       ],
       "boneCount": 29,
-      "vertices": 3231,
-      "triangles": 5802,
-      "maxInfluences": 2,
-      "blendedVertices": 242,
-      "maxWeightError": 0,
-      "maxEvaluatedDisplacement": 0.9088592579251777,
+      "vertices": 17628,
+      "triangles": 34150,
+      "maxInfluences": 4,
+      "blendedVertices": 8507,
+      "maxWeightError": 2.220446049250313e-16,
+      "maxEvaluatedDisplacement": 0.8747516539353071,
       "fcurves": 203,
       "sourceClips": [
         {
           "name": "idle",
-          "from": 0,
-          "to": 2,
+          "from": 0.0,
+          "to": 2.0,
           "fps": 60
         },
         {
@@ -177,8 +243,8 @@
         },
         {
           "name": "counter",
-          "from": 10,
-          "to": 11,
+          "from": 10.0,
+          "to": 11.0,
           "fps": 60
         },
         {
@@ -200,9 +266,603 @@
           "fps": 60
         }
       ],
-      "visiblePortraitPixels": 50885,
+      "visiblePortraitPixels": 74827,
       "portraitPoseFrame": 152,
-      "blenderVersion": "4.5.14 LTS"
+      "blenderVersion": "4.5.14 LTS",
+      "materialNames": [
+        "Skin",
+        "Coat",
+        "Shirt",
+        "Trousers",
+        "Hair",
+        "Iris",
+        "Sclera",
+        "Leather",
+        "Identity"
+      ],
+      "materialCount": 9,
+      "restPose": "human-a-rest-v2",
+      "baseObject": "GEO-body_male_realistic",
+      "uvStrategy": "single-tile-atlas",
+      "uvAtlas": {
+        "layers": 1,
+        "tileCount": 1,
+        "min": [
+          0.0,
+          0.0
+        ],
+        "max": [
+          1.0,
+          1.0
+        ]
+      },
+      "sourceBaseVertices": 10582,
+      "sourceBaseConnected": true,
+      "restJoints": {
+        "Root": {
+          "head": [
+            0,
+            0,
+            0
+          ],
+          "tail": [
+            0,
+            0,
+            0.1
+          ],
+          "parent": null
+        },
+        "Pelvis": {
+          "head": [
+            0,
+            0,
+            1.1
+          ],
+          "tail": [
+            0,
+            0,
+            1.28
+          ],
+          "parent": "Root"
+        },
+        "Spine": {
+          "head": [
+            0,
+            0,
+            1.28
+          ],
+          "tail": [
+            0,
+            0,
+            1.55
+          ],
+          "parent": "Pelvis"
+        },
+        "Chest": {
+          "head": [
+            0,
+            0,
+            1.55
+          ],
+          "tail": [
+            0,
+            0,
+            1.81
+          ],
+          "parent": "Spine"
+        },
+        "Neck": {
+          "head": [
+            0,
+            0,
+            1.81
+          ],
+          "tail": [
+            0,
+            -0.01,
+            1.96
+          ],
+          "parent": "Chest"
+        },
+        "Head": {
+          "head": [
+            0,
+            -0.01,
+            1.96
+          ],
+          "tail": [
+            0,
+            -0.01,
+            2.23
+          ],
+          "parent": "Neck"
+        },
+        "Jaw": {
+          "head": [
+            0,
+            -0.035,
+            2.025
+          ],
+          "tail": [
+            0,
+            -0.09,
+            1.995
+          ],
+          "parent": "Head"
+        },
+        "Brow.L": {
+          "head": [
+            0.055,
+            -0.16,
+            2.13
+          ],
+          "tail": [
+            0.11,
+            -0.15,
+            2.13
+          ],
+          "parent": "Head"
+        },
+        "Brow.R": {
+          "head": [
+            -0.055,
+            -0.16,
+            2.13
+          ],
+          "tail": [
+            -0.11,
+            -0.15,
+            2.13
+          ],
+          "parent": "Head"
+        },
+        "Clavicle.L": {
+          "head": [
+            0.07,
+            0,
+            1.78
+          ],
+          "tail": [
+            0.273,
+            0,
+            1.755
+          ],
+          "parent": "Chest"
+        },
+        "UpperArm.L": {
+          "head": [
+            0.273,
+            0,
+            1.755
+          ],
+          "tail": [
+            0.379,
+            0,
+            1.462
+          ],
+          "parent": "Clavicle.L"
+        },
+        "Forearm.L": {
+          "head": [
+            0.379,
+            0,
+            1.462
+          ],
+          "tail": [
+            0.493,
+            -0.073,
+            1.196
+          ],
+          "parent": "UpperArm.L"
+        },
+        "Hand.L": {
+          "head": [
+            0.493,
+            -0.073,
+            1.196
+          ],
+          "tail": [
+            0.532,
+            -0.154,
+            1.065
+          ],
+          "parent": "Forearm.L"
+        },
+        "Thumb.L": {
+          "head": [
+            0.493,
+            -0.168,
+            1.1
+          ],
+          "tail": [
+            0.508,
+            -0.218,
+            1.025
+          ],
+          "parent": "Hand.L"
+        },
+        "Fingers.L": {
+          "head": [
+            0.532,
+            -0.154,
+            1.065
+          ],
+          "tail": [
+            0.567,
+            -0.149,
+            0.948
+          ],
+          "parent": "Hand.L"
+        },
+        "Thigh.L": {
+          "head": [
+            0.15,
+            0.015,
+            1.1
+          ],
+          "tail": [
+            0.225,
+            0.005,
+            0.64
+          ],
+          "parent": "Pelvis"
+        },
+        "Shin.L": {
+          "head": [
+            0.225,
+            0.005,
+            0.64
+          ],
+          "tail": [
+            0.245,
+            0.04,
+            0.105
+          ],
+          "parent": "Thigh.L"
+        },
+        "Foot.L": {
+          "head": [
+            0.245,
+            0.04,
+            0.105
+          ],
+          "tail": [
+            0.25,
+            -0.12,
+            0.06
+          ],
+          "parent": "Shin.L"
+        },
+        "Toe.L": {
+          "head": [
+            0.25,
+            -0.12,
+            0.06
+          ],
+          "tail": [
+            0.25,
+            -0.24,
+            0.045
+          ],
+          "parent": "Foot.L"
+        },
+        "Clavicle.R": {
+          "head": [
+            -0.07,
+            0,
+            1.78
+          ],
+          "tail": [
+            -0.273,
+            0,
+            1.755
+          ],
+          "parent": "Chest"
+        },
+        "UpperArm.R": {
+          "head": [
+            -0.273,
+            0,
+            1.755
+          ],
+          "tail": [
+            -0.379,
+            0,
+            1.462
+          ],
+          "parent": "Clavicle.R"
+        },
+        "Forearm.R": {
+          "head": [
+            -0.379,
+            0,
+            1.462
+          ],
+          "tail": [
+            -0.493,
+            -0.073,
+            1.196
+          ],
+          "parent": "UpperArm.R"
+        },
+        "Hand.R": {
+          "head": [
+            -0.493,
+            -0.073,
+            1.196
+          ],
+          "tail": [
+            -0.532,
+            -0.154,
+            1.065
+          ],
+          "parent": "Forearm.R"
+        },
+        "Thumb.R": {
+          "head": [
+            -0.493,
+            -0.168,
+            1.1
+          ],
+          "tail": [
+            -0.508,
+            -0.218,
+            1.025
+          ],
+          "parent": "Hand.R"
+        },
+        "Fingers.R": {
+          "head": [
+            -0.532,
+            -0.154,
+            1.065
+          ],
+          "tail": [
+            -0.567,
+            -0.149,
+            0.948
+          ],
+          "parent": "Hand.R"
+        },
+        "Thigh.R": {
+          "head": [
+            -0.15,
+            0.015,
+            1.1
+          ],
+          "tail": [
+            -0.225,
+            0.005,
+            0.64
+          ],
+          "parent": "Pelvis"
+        },
+        "Shin.R": {
+          "head": [
+            -0.225,
+            0.005,
+            0.64
+          ],
+          "tail": [
+            -0.245,
+            0.04,
+            0.105
+          ],
+          "parent": "Thigh.R"
+        },
+        "Foot.R": {
+          "head": [
+            -0.245,
+            0.04,
+            0.105
+          ],
+          "tail": [
+            -0.25,
+            -0.12,
+            0.06
+          ],
+          "parent": "Shin.R"
+        },
+        "Toe.R": {
+          "head": [
+            -0.25,
+            -0.12,
+            0.06
+          ],
+          "tail": [
+            -0.25,
+            -0.24,
+            0.045
+          ],
+          "parent": "Foot.R"
+        }
+      },
+      "sanitizedTextureFields": [
+        "Objects/Texture/FileName",
+        "Objects/Texture/FileName",
+        "Objects/Texture/FileName",
+        "Objects/Video/Properties70/P",
+        "Objects/Video/Filename"
+      ],
+      "semanticWeightAudit": {
+        "lowerBodyVertices": 2430,
+        "misassignedLowerBody": 0
+      },
+      "evaluatedClipBounds": [
+        {
+          "clip": "idle",
+          "min": [
+            -0.5227609872817993,
+            -0.302067369222641,
+            0.0009600576013326645
+          ],
+          "max": [
+            0.5227720737457275,
+            0.17153701186180115,
+            2.240109443664551
+          ]
+        },
+        {
+          "clip": "intro-positive",
+          "min": [
+            -0.5227609872817993,
+            -0.33795166015625,
+            0.0009600576013326645
+          ],
+          "max": [
+            0.4927721619606018,
+            0.16953454911708832,
+            2.2405052185058594
+          ]
+        },
+        {
+          "clip": "intro-negative",
+          "min": [
+            -0.5227609872817993,
+            -0.33795166015625,
+            0.0009600576013326645
+          ],
+          "max": [
+            0.4927721619606018,
+            0.16953454911708832,
+            2.2406277656555176
+          ]
+        },
+        {
+          "clip": "charge",
+          "min": [
+            -0.5227608680725098,
+            -0.302067369222641,
+            0.0009600576013326645
+          ],
+          "max": [
+            0.7827722430229187,
+            0.18640479445457458,
+            2.240109443664551
+          ]
+        },
+        {
+          "clip": "attack-light",
+          "min": [
+            -0.5227609872817993,
+            -0.302067369222641,
+            0.0009600576013326645
+          ],
+          "max": [
+            0.912440299987793,
+            0.154366597533226,
+            2.239443063735962
+          ]
+        },
+        {
+          "clip": "attack-heavy",
+          "min": [
+            -0.5227609872817993,
+            -0.302067369222641,
+            0.0009600576013326645
+          ],
+          "max": [
+            0.912440299987793,
+            0.154366597533226,
+            2.239443063735962
+          ]
+        },
+        {
+          "clip": "recovery",
+          "min": [
+            -0.5227609872817993,
+            -0.302067369222641,
+            0.0009600576013326645
+          ],
+          "max": [
+            0.8027722239494324,
+            0.16953454911708832,
+            2.240109443664551
+          ]
+        },
+        {
+          "clip": "guard",
+          "min": [
+            -0.5227609872817993,
+            -0.3579513132572174,
+            0.0009600576013326645
+          ],
+          "max": [
+            0.3674958348274231,
+            0.16953454911708832,
+            2.360701560974121
+          ]
+        },
+        {
+          "clip": "hit",
+          "min": [
+            -0.5227609872817993,
+            -0.302067369222641,
+            0.0009600576013326645
+          ],
+          "max": [
+            0.5227720737457275,
+            0.17153701186180115,
+            2.2400388717651367
+          ]
+        },
+        {
+          "clip": "counter",
+          "min": [
+            -0.36749589443206787,
+            -0.35795122385025024,
+            0.0009598303586244583
+          ],
+          "max": [
+            0.36749589443206787,
+            0.154366597533226,
+            2.360701322555542
+          ]
+        },
+        {
+          "clip": "counter-recovery",
+          "min": [
+            -0.3674958348274231,
+            -0.302067369222641,
+            0.0009600576013326645
+          ],
+          "max": [
+            0.5227723121643066,
+            0.1925189048051834,
+            2.240109443664551
+          ]
+        },
+        {
+          "clip": "victory",
+          "min": [
+            -0.5227609872817993,
+            -0.302067369222641,
+            0.0009600576013326645
+          ],
+          "max": [
+            0.452772319316864,
+            0.16953454911708832,
+            2.241724967956543
+          ]
+        },
+        {
+          "clip": "defeat",
+          "min": [
+            -0.5227609872817993,
+            -0.302067369222641,
+            0.0009600576013326645
+          ],
+          "max": [
+            0.5227721333503723,
+            0.16823744773864746,
+            2.2263479232788086
+          ]
+        }
+      ],
+      "timelineFps": {
+        "fps": 60,
+        "fpsBase": 1.0
+      }
     },
     "convertedSkin": {
       "boneNames": [
@@ -237,17 +897,19 @@
         "Toe.R"
       ],
       "inverseBindMatrices": 29,
-      "exportVertices": 3231,
-      "blendedVertices": 242,
-      "maxWeightError": 2.9802322387695312e-08,
-      "maxInfluences": 2,
+      "exportVertices": 20166,
+      "blendedVertices": 9568,
+      "maxWeightError": 1.1874362826347351e-07,
+      "maxInfluences": 4,
       "animationName": "Scene",
       "animationChannels": 90,
       "wrapperScale": [
-        100,
-        100,
-        100
-      ]
+        100.0,
+        100.0,
+        100.0
+      ],
+      "animationDuration": 15.100000381469727,
+      "animationFps": 60
     },
     "imports": {
       "modelUuid": "8af9517d-1571-47c9-b22f-6fb91a0afca4",

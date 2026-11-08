@@ -10,14 +10,14 @@ import { InputBridge } from './InputBridge';
 import { latestContact, contactText } from './Feedback';
 import { BUILD_ID } from './BuildInfo';
 import { FighterPose, Point } from './ParryMotion';
-import { CharacterTimeline } from './CharacterTimeline';
+import { CharacterTimeline, presentationSide } from './CharacterTimeline';
 import { CharacterView, CastManifest, RoleId } from './CharacterView';
 import { CastCatalog, RoundSetup, RoundTicket, RoundGate, ROLE_IDS, createCastCatalog, makeRoundSetup, projectIntro, castResource } from './Cast';
 import { ArenaView } from './ArenaView';
 import { LayoutRect, layoutFromUiSafeRect } from './GameLayout';
 
 const { ccclass } = _decorator;
-type Page = 'menu' | 'practice' | 'loading' | 'intro' | 'battle' | 'paused' | 'confirm' | 'result' | 'error';
+type Page = 'menu' | 'practice' | 'loading' | 'intro' | 'battle' | 'paused' | 'confirm' | 'result' | 'error' | 'clip-qa';
 type Practice = 'normal' | 'hit' | 'block' | 'parry';
 type Button = { transform: UITransform; label: Label; name: string; action: () => void };
 type ContactFrame = {
@@ -32,6 +32,7 @@ const POSITIVE_PREVIEW: Record<RoleId, string> = {
     rookie: '有干劲，积极迎接新任务。',
 };
 const clamp = (n: number) => Math.max(0, Math.min(1, n));
+const QA_CLIPS=['idle','intro-positive','intro-negative','charge','attack-light','attack-heavy','recovery','guard','hit','counter','counter-recovery','victory','defeat'] as const;
 
 /** Presentation only: snapshots drive poses; semantic events drive feedback. */
 @ccclass('SlapGame')
@@ -75,6 +76,13 @@ export class SlapGame extends Component {
     private roundGate = new RoundGate();
     private introViewer: 0 | 1 = 0;
     private diagnosticIntro = false;
+    private playerStation: 0|1 = 0;
+    private clipQaReady=false;
+    private clipQaIndex=0;
+    private clipQaTime=0;
+    private clipQaPlaying=false;
+    private clipQaClose=false;
+    private clipQaLabel: Label|null=null;
     private startupError = '';
     private selectedRole: RoleId = 'manager';
     private opponentRole: RoleId = 'manager';
@@ -123,6 +131,9 @@ export class SlapGame extends Component {
                 this.frameDiagnosticCanvas = document.getElementById('GameCanvas');
             }
             if (query.get('diagnosticMotion') === '1') this.motionDiagnosticCanvas = document.getElementById('GameCanvas');
+            // Presentation-only QA: logical commands and Bot ownership stay 0/1.
+            if(query.get('diagnosticMotion')==='1'&&query.get('diagnosticStation')==='1') this.playerStation=1;
+            if(query.get('diagnosticMotion')==='1'&&query.get('diagnosticClips')==='1') this.page='clip-qa';
             this.diagnosticIntro = query.get('diagnosticIntro') === '1';
             if (this.diagnosticIntro) {
                 this.motionDiagnosticCanvas = document.getElementById('GameCanvas');
@@ -147,7 +158,7 @@ export class SlapGame extends Component {
         // Read-only diagnostics help tie runtime evidence to this exact build.
         (globalThis as unknown as Record<string, unknown>).__SLAP_DEBUG__ = {
             build: BUILD_ID,
-            inspect: () => ({ page: this.page, mode: this.mode, practice: this.practice,
+            inspect: () => ({ page: this.page, mode: this.mode, practice: this.practice, playerStation:this.playerStation,
                 setup: this.roundSetup, viewerActorId: this.introViewer,
                 state: this.session?.snapshot() ?? null, visualElapsedMs: this.resultVisualMs, events: this.trace.map(e => ({ ...e })), cast: this.skinEvidence(),
                 frames: this.frameDiagnostics() }),
@@ -235,8 +246,10 @@ export class SlapGame extends Component {
         this.node.addChild(this.world);
         const cameraNode = new Node('WorldCamera');
         this.world.addChild(cameraNode);
-        cameraNode.setPosition(0, 2.55, 7.2);
-        cameraNode.lookAt(new Vec3(0, 1.1, 0));
+        // Human proportions keep smaller heads than the technical v1 figures.
+        // Frame the face/palm exchange more closely while retaining both sides.
+        cameraNode.setPosition(0, 2.55, 5.5);
+        cameraNode.lookAt(new Vec3(0, 1.4, 0));
         const camera = cameraNode.addComponent(Camera);
         this.worldCamera = camera;
         camera.projection = Camera.ProjectionType.PERSPECTIVE;
@@ -299,7 +312,8 @@ export class SlapGame extends Component {
                 if (!this.isValid || token !== this.catalogGeneration) return;
                 this.cast = []; this.catalog = null; this.castError = failure instanceof Error ? failure.message : 'Character loading failed'; console.error(this.castError);
             }
-            if (this.page === 'menu') this.renderPage();
+            if(this.page==='clip-qa'&&this.cast.length) await this.prepareClipQa();
+            if (this.page === 'menu'||this.page==='clip-qa') this.renderPage();
         })();
     }
 
@@ -314,25 +328,67 @@ export class SlapGame extends Component {
         const templates = await Promise.all(manifests.map(m => this.loadAsset<Prefab>(m!.generated.imports.prefabUuid)));
         if (!this.isValid || !this.roundGate.isCurrent(ticket) || setup !== this.roundSetup) return;
         this.clearActors();
-        this.characterView.prepare(this.world, manifests as CastManifest[], templates);
+        this.characterView.prepare(this.world, manifests as CastManifest[], templates, this.playerStation);
     }
 
     private sampleActors(state: BattleState): void {
-        const samples = this.motion.sample(state, state.nowMs, this.resultVisualMs);
+        const samples = this.motion.sample(state, state.nowMs, this.resultVisualMs, this.playerStation);
         this.pendingPoses = samples.map(sample => sample.pose) as [FighterPose, FighterPose];
         this.characterView.sample(samples);
     }
 
     private skinEvidence() { return this.characterView.evidence(); }
 
+    private async prepareClipQa(): Promise<void> {
+        const token=++this.loadGeneration, manifest=this.cast.find(m=>m.source.roleId==='manager');
+        if(!manifest) return;
+        try {
+            const template=await this.loadAsset<Prefab>(manifest.generated.imports.prefabUuid);
+            if(!this.isValid||token!==this.loadGeneration||this.page!=='clip-qa') return;
+            this.clearActors();this.characterView.prepare(this.world,[manifest,manifest],[template,template],this.playerStation);this.clipQaReady=true;
+        } catch(error) {this.startupError=error instanceof Error?error.message:'动作资源加载失败';}
+    }
+
+    private clipQaUI(): void {
+        const l=this.layout, top=this.height/2;
+        this.panelAt(l.box(0,top-65,this.width+32,130),C.bg);
+        this.panelAt(l.box(0,-top+(this.landscape?54:100),this.width+32,this.landscape?108:200),C.bg);
+        this.labelAt('动作资源检查 · 非对局',l.box(0,top-32,this.width-32,48),32,C.gold);
+        this.clipQaLabel=this.labelAt('',l.box(0,top-91,this.width-32,62),22);
+        const operations:[string,()=>void][]=[
+            ['上一动作',()=>{this.clipQaIndex=(this.clipQaIndex+QA_CLIPS.length-1)%QA_CLIPS.length;this.clipQaTime=0;this.clipQaPlaying=false;this.renderPage();}],
+            ['下一动作',()=>{this.clipQaIndex=(this.clipQaIndex+1)%QA_CLIPS.length;this.clipQaTime=0;this.clipQaPlaying=false;this.renderPage();}],
+            [this.clipQaPlaying?'暂停播放':'播放',()=>{this.clipQaPlaying=!this.clipQaPlaying;this.renderPage();}],
+            ['起始姿势',()=>{this.clipQaTime=0;this.clipQaPlaying=false;this.renderPage();}],
+            ['末尾姿势',()=>{this.clipQaTime=1;this.clipQaPlaying=false;this.renderPage();}],
+            [this.clipQaClose?'全身视角':'脸手近景',()=>{this.clipQaClose=!this.clipQaClose;this.setClipQaCamera(this.clipQaClose);this.renderPage();}],
+            ['返回选择',()=>{this.clipQaReady=false;this.backToMenu();}],
+        ];
+        const columns=this.landscape?7:3, cell=(this.width-32)/columns;
+        operations.forEach(([name,action],index)=>this.buttonAt(name,l.target(-this.width/2+16+cell*(index%columns+.5),-top+54+Math.floor(index/columns)*88,cell-8,80),action));
+    }
+
+    private setClipQaCamera(close: boolean): void {
+        if(!this.worldCamera) return;
+        this.worldCamera.node.setPosition(0,close?2.05:2.55,close?2.25:5.5);
+        this.worldCamera.node.lookAt(new Vec3(0,close?1.85:1.4,0));
+    }
+
     lateUpdate(): void {
+        if(this.page==='clip-qa'&&this.clipQaReady) {
+            this.characterView.observePreview();
+            this.motionDiagnosticCanvas?.setAttribute('data-slap-clip-qa',JSON.stringify({build:BUILD_ID,page:this.page,roleId:'manager',playerStation:this.playerStation,
+                clip:QA_CLIPS[this.clipQaIndex],normalizedTime:this.clipQaTime,duration:this.characterView.clipDuration(QA_CLIPS[this.clipQaIndex]),playing:this.clipQaPlaying,camera:this.clipQaClose?'upper':'full',
+                session:null,events:[],cast:this.skinEvidence()}));
+            return;
+        }
         const state = this.pendingSkinState, poses = this.pendingPoses;
         if (!state || !poses || this.characterView.count !== 2) return;
         this.characterView.correct(state);
         if (this.motionDiagnosticCanvas && (this.page === 'battle' || this.page === 'result')) {
             this.motionSamples.push({ nowMs: state.nowMs, visualElapsedMs: this.resultVisualMs, poses, actual: this.characterView.measurements() });
             if (this.motionSamples.length > 120) this.motionSamples.shift();
-            this.motionDiagnosticCanvas.setAttribute('data-slap-motion', JSON.stringify({ build: BUILD_ID, page: this.page, mode: this.mode, practice: this.practice,
+            this.motionDiagnosticCanvas.setAttribute('data-slap-motion', JSON.stringify({ build: BUILD_ID, page: this.page, mode: this.mode, practice: this.practice,playerStation:this.playerStation,
                 state, visualElapsedMs: this.resultVisualMs, events: this.trace, samples: this.motionSamples, cast: this.skinEvidence() }));
         }
     }
@@ -544,6 +600,7 @@ export class SlapGame extends Component {
         this.attackAvailable = this.guardAvailable = null;
         this.attackLabel = this.guardLabel = this.statusLabel = this.resultLabel = this.timerLabel = null;
         this.hpLabels = []; this.hpBars = []; this.chargeBar = null;
+        if(this.page==='clip-qa') {this.clipQaUI();return;}
         if (this.page === 'battle') { this.battleUI(); return; }
         if (this.page !== 'result') {
             // SHOW_ALL's design rectangle can be narrower than the full window.
@@ -590,7 +647,7 @@ export class SlapGame extends Component {
             this.panelAt({ ...footerBand, x: 0, width: bandWidth }, C.bg);
             this.labelAt(result === 'player' ? '你赢了' : result === 'bot' ? '这局输了' : '平局', l.result.title, this.landscape ? 40 : 56, C.gold);
             const state = this.session!.snapshot();
-            this.labelAt(`剩余生命  ${state.fighters[0].hp} : ${state.fighters[1].hp}`, l.result.hp);
+            this.labelAt(this.playerStation===0?`剩余生命  ${state.fighters[0].hp} : ${state.fighters[1].hp}`:`你的生命 ${state.fighters[0].hp} · 对手 ${state.fighters[1].hp}`, l.result.hp);
             if (!this.landscape) this.labelAt(this.mode === 'charge' ? '本局：蓄力出掌' : '本局：点击出掌', l.result.mode, 24);
             this.buttonAt(this.practice === 'normal' ? '再来一局' : '重试练习', l.result.retry, () => this.begin(this.practice, true), true);
             this.buttonAt('换个人设', l.result.change, () => this.backToMenu());
@@ -604,9 +661,10 @@ export class SlapGame extends Component {
     private battleUI(): void {
         const l = this.layout.battle;
         for (let i = 0; i < 2; i++) {
-            this.hpLabels.push(this.labelAt(`${i === 0 ? '你' : '机器人'}  5/5`, l.hp[i], 32, i === 0 ? C.blue : C.orange));
-            this.labelAt(this.roundSetup?.actors[i].displayName ?? '', l.roles[i], 24, i === 0 ? C.blue : C.orange);
-            this.hpBars.push(this.panelAt(l.hpBars[i]));
+            const side=presentationSide(i as 0|1,this.playerStation);
+            this.hpLabels.push(this.labelAt(`${i === 0 ? '你' : '机器人'}  5/5`, l.hp[side], 32, i === 0 ? C.blue : C.orange));
+            this.labelAt(this.roundSetup?.actors[i].displayName ?? '', l.roles[side], 24, i === 0 ? C.blue : C.orange);
+            this.hpBars.push(this.panelAt(l.hpBars[side]));
         }
         this.buttonAt('暂停', l.pause, () => this.pause());
         this.timerLabel = this.labelAt('', l.timer, 24);
@@ -722,6 +780,8 @@ export class SlapGame extends Component {
         this.changePage('battle');
     }
     private backToMenu(): void {
+        if(this.page==='clip-qa') {this.clipQaClose=false;this.setClipQaCamera(false);}
+        this.motionDiagnosticCanvas?.removeAttribute('data-slap-clip-qa');
         ++this.loadGeneration;
         this.roundGate.clear(); this.roundSetup = null;
         this.bridge.cancelAll(); this.session?.pause(); this.session = null;
@@ -749,6 +809,15 @@ export class SlapGame extends Component {
         this.frameRecentDtMs.push(dtMs);
         if (this.frameRecentDtMs.length > 120) this.frameRecentDtMs.shift();
         this.publishCastDiagnostics();
+        if(this.page==='clip-qa') {
+            if(this.clipQaReady&&!this.hidden) {
+                const name=QA_CLIPS[this.clipQaIndex],duration=this.characterView.clipDuration(name);
+                if(this.clipQaPlaying) this.clipQaTime=(this.clipQaTime+Math.max(0,dt)/duration)%1;
+                this.characterView.preview(name,this.clipQaTime);
+                if(this.clipQaLabel) this.clipQaLabel.string=`职场中层 · ${name} · ${(this.clipQaTime*duration).toFixed(2)} / ${duration.toFixed(2)}秒\n${BUILD_ID}`;
+            } else if(this.clipQaLabel) this.clipQaLabel.string=this.startupError||'正在加载实际模型…';
+            this.publishFrameDiagnostics(wallMs);return;
+        }
         if (this.ready && this.session && this.page === 'result') {
             if (!this.hidden) {
                 if (this.skipVisualFrame) this.skipVisualFrame = false;
@@ -850,6 +919,7 @@ export class SlapGame extends Component {
         this.motionDiagnosticCanvas?.removeAttribute('data-slap-motion');
         this.motionDiagnosticCanvas?.removeAttribute('data-slap-cast');
         this.motionDiagnosticCanvas?.removeAttribute('data-slap-layout');
+        this.motionDiagnosticCanvas?.removeAttribute('data-slap-clip-qa');
         if (this.motionDiagnosticCanvas) director.off(Director.EVENT_AFTER_DRAW, this.captureContactFrame, this);
         this.clearContactFrames();
         input.off(Input.EventType.TOUCH_START, this.touchStart, this);

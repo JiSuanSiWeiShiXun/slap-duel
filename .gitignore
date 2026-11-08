@@ -1,5 +1,7 @@
 # Generated dependencies, Cocos caches and build artifacts.
 node_modules/
+__pycache__/
+*.py[cod]
 game/library/
 game/temp/
 game/local/
