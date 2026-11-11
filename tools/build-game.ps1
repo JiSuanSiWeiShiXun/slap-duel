@@ -52,6 +52,8 @@ if ($creatorExit -ne 36) { throw "Cocos build failed (exit $creatorExit). See $l
 if ($Target -eq 'wechatgame') {
     & node (Join-Path $PSScriptRoot 'configure-wechat.mjs')
     if ($LASTEXITCODE -ne 0) { throw 'WeChat compiler settings post-processing failed' }
+    & node (Join-Path $PSScriptRoot 'check-wechat-package.mjs')
+    if ($LASTEXITCODE -ne 0) { throw 'WeChat local subpackages or main-package budget verification failed' }
 }
 & node (Join-Path $PSScriptRoot 'check-game.mjs') --stamp $Target
 if ($LASTEXITCODE -ne 0) { throw 'Cocos reported success but output verification failed' }
