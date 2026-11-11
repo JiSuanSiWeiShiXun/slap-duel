@@ -7,6 +7,7 @@ import {
 import { ActionKind, AttackMode, BattleState, BattleEvent, DEFAULT_RULES } from './core/Battle';
 import { LocalSession } from './session/LocalSession';
 import { InputBridge } from './InputBridge';
+import { ActiveSessionClock } from './ActiveSessionClock';
 import { latestContact, contactText } from './Feedback';
 import { BUILD_ID } from './BuildInfo';
 import { FighterPose, Point } from './ParryMotion';
@@ -15,6 +16,7 @@ import { CharacterView, CastManifest, RoleId } from './CharacterView';
 import { CastCatalog, RoundSetup, RoundTicket, RoundGate, ROLE_IDS, createCastCatalog, makeRoundSetup, projectIntro, castResource } from './Cast';
 import { ArenaView } from './ArenaView';
 import { LayoutRect, layoutFromUiSafeRect } from './GameLayout';
+import { InputObservation, InputObservationContext, InputObservationKind, InputObservationSource, inputObservationRequested } from './InputObservation';
 
 const { ccclass } = _decorator;
 type Page = 'menu' | 'practice' | 'loading' | 'intro' | 'battle' | 'paused' | 'confirm' | 'result' | 'error' | 'clip-qa';
@@ -24,6 +26,15 @@ type ContactFrame = {
     stage: 'guard-raise' | 'parry-catch' | 'counter-dip' | 'counter-rise' | 'counter-hit'; actorId: number;
     nowMs: number; hp: number[]; phases: string[]; events: BattleEvent[];
     width: number; height: number; image?: string; error?: string;
+};
+type WechatCancelEvent = { changedTouches?: { identifier?: number }[]; timeStamp?: number };
+type WechatInputObservationApi = {
+    getLaunchOptionsSync?: () => { query?: unknown };
+    onTouchCancel?: (listener: (event: WechatCancelEvent) => void) => void;
+    offTouchCancel?: (listener: (event: WechatCancelEvent) => void) => void;
+};
+type DiagnosticClipboardApi = {
+    setClipboardData?: (options: { data: string; success: () => void; fail: () => void }) => void;
 };
 const C = { bg: '#16232C', panel: '#293C48', ink: '#F5F4EF', gold: '#FFD166', blue: '#73C5D5', orange: '#E6A17A', danger: '#F47C7C' };
 const POSITIVE_PREVIEW: Record<RoleId, string> = {
@@ -41,7 +52,7 @@ export class SlapGame extends Component {
     private mode: AttackMode = 'charge';
     private practice: Practice = 'normal';
     private session: LocalSession | null = null;
-    private clockMs = 0;
+    private activeClock = new ActiveSessionClock(() => performance.now());
     private resultVisualMs = 0;
     private skipVisualFrame = false;
     private sequence = 0;
@@ -121,11 +132,31 @@ export class SlapGame extends Component {
     private diagnosticStart: 'slow' | 'fail-once' | null = null;
     private diagnosticStartFailed = false;
     private diagnosticRole: string | null = null;
+    private inputObservation = new InputObservation(false, BUILD_ID);
+    private inputDiagnosticHud: Label | null = null;
+    private inputDiagnosticCanvas: HTMLElement | null = null;
+    private inputDiagnosticPublishedMs = -Infinity;
+    private inputAfterDrawSubscribed = false;
+    private inputDiagnosticDisposed = false;
+    private inputDiagnosticCopyBusy = false;
+    private inputDiagnosticCopyStatus = '';
+    private inputDiagnosticCopyLabel: Label | null = null;
+    private inputDiagnosticPanelActive = false;
+    private inputDiagnosticCopyGeneration = 0;
+    private wechatInputObservationApi: WechatInputObservationApi | null = null;
+    private readonly observeWechatCancel = (event: WechatCancelEvent): void => {
+        try {
+            this.observeInput('wechat-platform', 'touch-cancel', 'callback', 'wx.onTouchCancel',
+                (event.changedTouches ?? []).flatMap(t => typeof t.identifier === 'number' ? [t.identifier] : []), event.timeStamp ?? null);
+        } catch { /* Malformed diagnostic payload must not affect other platform listeners. */ }
+    };
 
     onLoad(): void {
         profiler.hideStats();
+        let browserInputDiagnostic: unknown;
         if (sys.isBrowser && typeof document !== 'undefined') {
             const query = new URLSearchParams(window.location.search);
+            browserInputDiagnostic = query.get('diagnosticInput');
             const fps = query.get('diagnosticFps');
             if (fps !== null && ['15', '30', '60'].includes(fps)) {
                 this.frameDiagnosticCanvas = document.getElementById('GameCanvas');
@@ -143,6 +174,7 @@ export class SlapGame extends Component {
             const startup = query.get('diagnosticStart');
             if (startup === 'slow' || startup === 'fail-once') this.diagnosticStart = startup;
         }
+        this.prepareInputObservation(browserInputDiagnostic);
         this.buildWorld();
         this.buildCanvas();
         this.resize();
@@ -161,8 +193,105 @@ export class SlapGame extends Component {
             inspect: () => ({ page: this.page, mode: this.mode, practice: this.practice, playerStation:this.playerStation,
                 setup: this.roundSetup, viewerActorId: this.introViewer,
                 state: this.session?.snapshot() ?? null, visualElapsedMs: this.resultVisualMs, events: this.trace.map(e => ({ ...e })), cast: this.skinEvidence(),
-                frames: this.frameDiagnostics() }),
+                frames: this.frameDiagnostics(), input: this.inputObservation.snapshot() }),
         };
+    }
+
+    private prepareInputObservation(browserValue: unknown): void {
+        const api = (globalThis as unknown as { wx?: WechatInputObservationApi }).wx;
+        let launchQuery: unknown;
+        // Read only this named launch flag; never retain scene/query/account data.
+        try { launchQuery = api?.getLaunchOptionsSync?.().query; } catch { /* No launch evidence available. */ }
+        this.inputObservation = new InputObservation(inputObservationRequested(browserValue, launchQuery), BUILD_ID);
+        if (!this.inputObservation.enabled) return;
+        director.on(Director.EVENT_AFTER_DRAW, this.observeInputAfterDraw, this);
+        this.inputAfterDrawSubscribed = true;
+        if (sys.isBrowser && typeof document !== 'undefined') this.inputDiagnosticCanvas = document.getElementById('GameCanvas');
+        if (!api) return;
+        // Only subscribe where the identical observer can be removed. The engine's listener is untouched.
+        if (typeof api.onTouchCancel !== 'function' || typeof api.offTouchCancel !== 'function') {
+            this.inputObservation.setNativeCancelObservation('unavailable-off-api'); return;
+        }
+        try {
+            api.onTouchCancel(this.observeWechatCancel);
+            this.wechatInputObservationApi = api;
+            this.inputObservation.setNativeCancelObservation('observing');
+        } catch { this.inputObservation.setNativeCancelObservation('registration-failed'); }
+    }
+
+    private inputObservationContext(): InputObservationContext {
+        const state = this.session?.snapshot();
+        return { page: this.page, mode: this.mode, practice: this.practice, hidden: this.hidden,
+            sessionId: state?.sessionId ?? null, nowMs: state?.nowMs ?? null, paused: this.session?.paused ?? null,
+            commandSequence: this.sequence,
+            fighters: state?.fighters.map(f => ({ hp: f.hp, phase: f.phase, chargeStartMs: f.chargeStartMs,
+                contactAtMs: f.contactAtMs, guardCharges: f.guardCharges })) ?? [],
+            recentEvents: this.trace.slice(-8).map(e => ({ id: e.id, kind: e.kind, atMs: e.atMs,
+                actorId: e.actorId, targetId: e.targetId, damage: e.damage })) };
+    }
+
+    private observeInputAfterDraw(): void {
+        if (!this.inputObservation.enabled || this.inputDiagnosticDisposed) return;
+        try {
+            this.inputObservation.observeAfterDraw(performance.now(), Date.now(), this.inputObservationContext());
+        } catch { /* Optional render-submission observation must never affect the game. */ }
+    }
+
+    private copyInputDiagnostic(): void {
+        if (!this.inputObservation.enabled || this.inputDiagnosticDisposed || this.page !== 'paused' || this.inputDiagnosticCopyBusy) return;
+        const feedback = (message: string): void => {
+            if (!this.inputObservation.enabled || this.inputDiagnosticDisposed) return;
+            this.inputDiagnosticCopyStatus = message;
+            if (this.inputDiagnosticCopyLabel?.isValid) this.inputDiagnosticCopyLabel.string = message;
+        };
+        const generation = this.inputDiagnosticCopyGeneration;
+        let settled = false;
+        const finish = (message: string): void => {
+            if (settled || this.inputDiagnosticDisposed || !this.inputObservation.enabled || generation !== this.inputDiagnosticCopyGeneration) return;
+            settled = true; this.inputDiagnosticCopyBusy = false; feedback(message);
+        };
+        try {
+            const data = this.inputObservation.serialize(this.inputObservationContext(), performance.now(), Date.now());
+            if (data === null) return;
+            this.inputDiagnosticCopyBusy = true; feedback('正在复制诊断…');
+            const api = (globalThis as unknown as { wx?: DiagnosticClipboardApi }).wx;
+            if (typeof api?.setClipboardData === 'function') {
+                api.setClipboardData({ data, success: () => finish('诊断已复制，可粘贴发回。'), fail: () => finish('复制失败，请重试。') });
+            } else if (sys.isBrowser && typeof navigator !== 'undefined' && typeof navigator.clipboard?.writeText === 'function') {
+                void navigator.clipboard.writeText(data).then(() => finish('诊断已复制，可粘贴发回。'), () => finish('复制失败，请重试。'));
+            } else finish('当前环境无法复制诊断。');
+        } catch { finish('复制失败，请重试。'); }
+    }
+
+    private observeInput(source: InputObservationSource, kind: InputObservationKind, phase: 'before' | 'after' | 'callback',
+        reportedType: string, pointerIds: number[] = [], sourceTimeStamp: number | null = null, cocosSimulate: boolean | null = null): void {
+        if (!this.inputObservation.enabled || this.inputDiagnosticDisposed) return;
+        try {
+            this.inputObservation.record({ source, kind, phase, reportedType, pointerIds, sourceTimeStamp, cocosSimulate,
+                wallTimeMs: performance.now(), unixTimeMs: Date.now(), context: this.inputObservationContext() });
+            this.publishInputObservation(true);
+        } catch { /* Observation must never change input handling or match state. */ }
+    }
+
+    private publishInputObservation(force = false): void {
+        if (!this.inputObservation.enabled || this.inputDiagnosticDisposed) return;
+        try {
+            const wallMs = performance.now();
+            if (!force && wallMs - this.inputDiagnosticPublishedMs < 100) return;
+            this.inputDiagnosticPublishedMs = wallMs;
+            const observed = this.inputObservation.snapshot();
+            if (this.inputDiagnosticHud && this.inputDiagnosticHud.isValid) {
+                const last = observed.records[observed.records.length - 1];
+                this.inputDiagnosticHud.string = `取消 C:${observed.counts.cocosTouchCancel} /鼠${observed.counts.cocosMouseCancel} /触${observed.counts.cocosUnsimulatedCancel} /未知${observed.counts.cocosUnknownCancel} /wx${observed.counts.wechatTouchCancel}\n`
+                    + `隐/显 ${observed.counts.gameHide}/${observed.counts.gameShow} · ${last ? `${last.kind}/${last.phase} · ${last.delivery}` : '尚无输入事件'}\n`
+                    + `${BUILD_ID} · 微信观测 ${observed.nativeCancelObservation}`;
+                this.inputDiagnosticHud.node.setPosition(this.layout.safe.centerX, this.layout.safe.centerY, 0);
+                this.inputDiagnosticHud.node.getComponent(UITransform)!.setContentSize(Math.max(1, this.layout.safe.width - 24), 116);
+                // Passive Label only: no button, BlockInputEvents, hit rectangle or command callback.
+                this.inputDiagnosticHud.node.setSiblingIndex(this.ui.children.length - 1);
+            }
+            this.inputDiagnosticCanvas?.setAttribute('data-slap-input', JSON.stringify(observed));
+        } catch { /* HUD/DOM observations are optional and cannot interrupt a match. */ }
     }
 
     private frameDiagnostics() {
@@ -410,6 +539,11 @@ export class SlapGame extends Component {
         camera.clearFlags = Camera.ClearFlag.DEPTH_ONLY;
         canvas.cameraComponent = camera;
         canvas.alignCanvasWithScreen = true;
+        if (this.inputObservation.enabled) {
+            this.inputDiagnosticHud = this.text('', 0, 0, 680, 20, C.gold, 116);
+            this.inputDiagnosticHud.node.name = 'InputObservationHud';
+            this.inputDiagnosticHud.lineHeight = 31;
+        }
     }
 
     private resize(): void {
@@ -435,6 +569,7 @@ export class SlapGame extends Component {
         });
         this.ui.getComponent(UITransform)!.setContentSize(this.width, this.height);
         this.renderPage();
+        this.publishInputObservation(true);
     }
 
     private uiNode(name: string, x: number, y: number, w: number, h: number): Node {
@@ -591,15 +726,24 @@ export class SlapGame extends Component {
     }
 
     private renderPage(): void {
-        for (const child of [...this.ui.children]) child.destroy();
+        for (const child of [...this.ui.children]) if (child !== this.inputDiagnosticHud?.node) child.destroy();
         for (const frame of this.portraitFrames) frame.destroy();
         this.portraitFrames = [];
+        this.inputDiagnosticCopyLabel = null;
         this.buttons = [];
         this.attack = this.guard = null;
         this.attackPanel = this.guardPanel = null;
         this.attackAvailable = this.guardAvailable = null;
         this.attackLabel = this.guardLabel = this.statusLabel = this.resultLabel = this.timerLabel = null;
         this.hpLabels = []; this.hpBars = []; this.chargeBar = null;
+        if (this.inputObservation.enabled) {
+            const active = this.page === 'paused' && !this.inputDiagnosticDisposed;
+            if (active !== this.inputDiagnosticPanelActive) {
+                this.inputDiagnosticCopyGeneration++;
+                this.inputDiagnosticCopyBusy = false; this.inputDiagnosticCopyStatus = '';
+            }
+            this.inputDiagnosticPanelActive = active;
+        }
         if(this.page==='clip-qa') {this.clipQaUI();return;}
         if (this.page === 'battle') { this.battleUI(); return; }
         if (this.page !== 'result') {
@@ -636,6 +780,12 @@ export class SlapGame extends Component {
             this.buttonAt(this.page === 'paused' ? '返回选择' : '放弃并返回', l.target(0, -180, 520, 96),
                 () => this.page === 'paused' ? this.changePage('confirm') : this.backToMenu(), false,
                 this.page === 'confirm' ? 'danger' : 'normal');
+            if (this.page === 'paused' && this.inputObservation.enabled && !this.inputDiagnosticDisposed) {
+                this.buttonAt('复制诊断', l.target(this.landscape ? 440 : 0, this.landscape ? -180 : -300, this.landscape ? 300 : 520, 96),
+                    () => this.copyInputDiagnostic());
+                this.inputDiagnosticCopyLabel = this.labelAt(this.inputDiagnosticCopyStatus || '复制后可粘贴发回。',
+                    l.box(0, this.landscape ? -286 : -390, this.width - 40, 64), 24);
+            }
         } else if (this.page === 'result') {
             const result = this.session?.snapshot().result;
             // Only header/footer panels cover the world; the real result actors
@@ -703,6 +853,7 @@ export class SlapGame extends Component {
         }
         this.roundSetup = ticket.setup;
         this.mode = ticket.setup.mode;
+        this.activeClock.freezeAt(this.session?.snapshot().nowMs ?? 0);
         this.bridge.cancelAll();
         this.session?.pause(); this.session = null;
         this.clearActors(); this.motion.reset(); this.seenEvents.clear(); this.trace = [];
@@ -734,48 +885,86 @@ export class SlapGame extends Component {
 
     private enterBattle(): void {
         if (this.page !== 'intro' || !this.roundSetup || this.characterView.count !== 2) return;
+        this.activeClock.freezeAt(this.session?.snapshot().nowMs ?? 0);
         this.bridge.cancelAll();
         this.session = new LocalSession({ sessionId: `local-${++this.round}`, mode: this.roundSetup.mode, practice: this.practice, seed: 104729 });
-        this.clockMs = 0; this.sequence = 0; this.resultVisualMs = 0; this.skipVisualFrame = false;
+        this.activeClock.start(this.session.snapshot().nowMs);
+        this.sequence = 0; this.resultVisualMs = 0; this.skipVisualFrame = false;
         this.motion.reset(this.session.snapshot().sessionId); this.motionSamples = []; this.clearContactFrames();
         this.seenEvents.clear(); this.trace = []; this.feedback = ''; this.feedbackUntil = 0;
-        if (this.hidden) { this.session.pause(); this.changePage('paused'); } else this.changePage('battle');
+        if (this.hidden) { this.activeClock.freezeAt(this.session.snapshot().nowMs); this.session.pause(); this.changePage('paused'); }
+        else this.changePage('battle');
     }
 
     private submit(action: ActionKind): void {
         if (!this.session || this.page !== 'battle' || this.session.paused) return;
         const state = this.session.snapshot();
-        this.session.submit({ sessionId: state.sessionId, actorId: 0, sequence: ++this.sequence, atMs: state.nowMs, action });
-        this.session.advanceTo(state.nowMs);
+        if (state.result) return;
+        const atMs = this.activeClock.nowMs();
+        // Queue first: a guard delivered exactly at contact must retain the
+        // core's command-before-contact priority. Past the round limit, only
+        // settle the result; do not emit invalid-time or ended commands.
+        if (atMs <= DEFAULT_RULES.roundDurationMs) {
+            this.session.submit({ sessionId: state.sessionId, actorId: 0, sequence: ++this.sequence, atMs, action });
+        }
+        this.session.advanceTo(atMs);
+        this.presentSession();
+    }
+
+    private presentSession(): void {
+        if (!this.session) return;
         this.consume(this.session.drainEvents());
-        this.drawState(this.session.snapshot());
+        const state = this.session.snapshot();
+        this.drawState(state);
+        if (state.result !== null) {
+            this.activeClock.freezeAt(state.nowMs);
+            this.bridge.cancelAll(); this.resultVisualMs = 0; this.skipVisualFrame = true; this.changePage('result');
+        }
     }
 
     private touchStart(event: EventTouch): void {
-        const point = event.getLocation();
-        for (let i = this.buttons.length - 1; i >= 0; i--) {
-            if (this.buttons[i].transform.hitTest(point, event.windowId)) { this.buttons[i].action(); return; }
-        }
-        if (this.page !== 'battle') return;
         const pointer = event.getID();
-        if (pointer === null) return;
-        if (this.attack?.hitTest(point, event.windowId)) this.bridge.downAttack(pointer, this.mode);
-        else if (this.guard?.hitTest(point, event.windowId)) this.bridge.downGuard(pointer);
+        const simulate = typeof event.simulate === 'boolean' ? event.simulate : null;
+        this.observeInput('cocos-input', 'touch-start', 'before', event.type, pointer === null ? [] : [pointer], null, simulate);
+        try {
+            const point = event.getLocation();
+            for (let i = this.buttons.length - 1; i >= 0; i--) {
+                if (this.buttons[i].transform.hitTest(point, event.windowId)) { this.buttons[i].action(); return; }
+            }
+            if (this.page !== 'battle') return;
+            if (pointer === null) return;
+            if (this.attack?.hitTest(point, event.windowId)) this.bridge.downAttack(pointer, this.mode);
+            else if (this.guard?.hitTest(point, event.windowId)) this.bridge.downGuard(pointer);
+        } finally { this.observeInput('cocos-input', 'touch-start', 'after', event.type, pointer === null ? [] : [pointer], null, simulate); }
     }
-    private touchEnd(event: EventTouch): void { const id = event.getID(); if (id !== null) this.bridge.up(id); }
-    private touchCancel(event: EventTouch): void { const id = event.getID(); if (id !== null) this.bridge.cancel(id); }
+    private touchEnd(event: EventTouch): void {
+        const id = event.getID();
+        const simulate = typeof event.simulate === 'boolean' ? event.simulate : null;
+        this.observeInput('cocos-input', 'touch-end', 'before', event.type, id === null ? [] : [id], null, simulate);
+        if (id !== null) this.bridge.up(id);
+        this.observeInput('cocos-input', 'touch-end', 'after', event.type, id === null ? [] : [id], null, simulate);
+    }
+    private touchCancel(event: EventTouch): void {
+        const id = event.getID();
+        const simulate = typeof event.simulate === 'boolean' ? event.simulate : null;
+        this.observeInput('cocos-input', 'touch-cancel', 'before', event.type, id === null ? [] : [id], null, simulate);
+        if (id !== null) this.bridge.cancel(id);
+        this.observeInput('cocos-input', 'touch-cancel', 'after', event.type, id === null ? [] : [id], null, simulate);
+    }
 
     private pause(): void {
         if (this.page !== 'battle' || !this.session) return;
+        // Cancellation can synchronously call submit. Freeze first so that it
+        // runs at the resolved snapshot and cannot catch up a hit during hide.
+        this.activeClock.freezeAt(this.session.snapshot().nowMs);
         this.bridge.cancelAll();
         this.session.pause();
-        this.clockMs = this.session.snapshot().nowMs;
         this.changePage('paused');
     }
     private resume(): void {
-        if (!this.session) return;
+        if (!this.session || this.hidden || (this.page !== 'paused' && this.page !== 'confirm')) return;
         this.bridge.cancelAll();
-        this.clockMs = this.session.snapshot().nowMs;
+        this.activeClock.resume(this.session.snapshot().nowMs);
         this.session.resume();
         this.changePage('battle');
     }
@@ -784,6 +973,7 @@ export class SlapGame extends Component {
         this.motionDiagnosticCanvas?.removeAttribute('data-slap-clip-qa');
         ++this.loadGeneration;
         this.roundGate.clear(); this.roundSetup = null;
+        this.activeClock.freezeAt(this.session?.snapshot().nowMs ?? 0);
         this.bridge.cancelAll(); this.session?.pause(); this.session = null;
         this.clearActors();
         this.resultVisualMs = 0; this.skipVisualFrame = false;
@@ -792,10 +982,19 @@ export class SlapGame extends Component {
         this.motionSamples = []; this.motionDiagnosticCanvas?.removeAttribute('data-slap-motion');
         this.clearContactFrames();
     }
-    private hide(): void { this.hidden = true; this.skipVisualFrame = true; this.pause(); }
-    private show(): void { this.hidden = false; this.skipVisualFrame = true; /* Only Continue resumes an active match. */ }
+    private hide(): void {
+        this.observeInput('cocos-game', 'game-hide', 'before', Game.EVENT_HIDE);
+        this.hidden = true; this.skipVisualFrame = true; this.pause();
+        this.observeInput('cocos-game', 'game-hide', 'after', Game.EVENT_HIDE);
+    }
+    private show(): void {
+        this.observeInput('cocos-game', 'game-show', 'before', Game.EVENT_SHOW);
+        this.hidden = false; this.skipVisualFrame = true; /* Only Continue resumes an active match. */
+        this.observeInput('cocos-game', 'game-show', 'after', Game.EVENT_SHOW);
+    }
 
     update(dt: number): void {
+        this.publishInputObservation();
         // Observe actual Component updates even on menus/paused screens. These
         // counters never control simulation time or submit gameplay commands.
         const wallMs = performance.now();
@@ -832,12 +1031,8 @@ export class SlapGame extends Component {
             this.publishFrameDiagnostics(wallMs);
             return;
         }
-        this.clockMs += Math.max(0, dt) * 1000;
-        this.session.advanceTo(Math.floor(this.clockMs));
-        this.consume(this.session.drainEvents());
-        const state = this.session.snapshot();
-        this.drawState(state);
-        if (state.result !== null) { this.bridge.cancelAll(); this.resultVisualMs = 0; this.skipVisualFrame = true; this.changePage('result'); }
+        this.session.advanceTo(this.activeClock.nowMs());
+        this.presentSession();
         this.publishFrameDiagnostics(wallMs);
     }
 
@@ -913,6 +1108,19 @@ export class SlapGame extends Component {
     }
 
     onDestroy(): void {
+        this.inputDiagnosticDisposed = true;
+        if (this.inputAfterDrawSubscribed) {
+            director.off(Director.EVENT_AFTER_DRAW, this.observeInputAfterDraw, this);
+            this.inputAfterDrawSubscribed = false;
+        }
+        if (this.wechatInputObservationApi) {
+            try {
+                this.wechatInputObservationApi.offTouchCancel!(this.observeWechatCancel);
+                this.inputObservation.setNativeCancelObservation('removed');
+            } catch { this.inputObservation.setNativeCancelObservation('removal-failed'); }
+            this.wechatInputObservationApi = null;
+        }
+        this.inputDiagnosticCanvas?.removeAttribute('data-slap-input');
         ++this.loadGeneration; ++this.catalogGeneration; this.roundGate.clear(); this.roundSetup = null; this.clearActors();
         for (const frame of this.portraitFrames) frame.destroy();
         this.frameDiagnosticCanvas?.removeAttribute('data-slap-diagnostics');
@@ -927,6 +1135,7 @@ export class SlapGame extends Component {
         input.off(Input.EventType.TOUCH_CANCEL, this.touchCancel, this);
         game.off(Game.EVENT_HIDE, this.hide, this); game.off(Game.EVENT_SHOW, this.show, this);
         view.off('canvas-resize', this.resize, this);
+        this.activeClock.freezeAt(this.session?.snapshot().nowMs ?? 0);
         this.bridge.cancelAll(); this.session?.pause();
         this.motion.reset();
         this.arena?.dispose(); this.arena = null;
