@@ -8,6 +8,7 @@ import { ActionKind, AttackMode, BattleState, BattleEvent, DEFAULT_RULES } from 
 import { LocalSession } from './session/LocalSession';
 import { InputBridge } from './InputBridge';
 import { ActiveSessionClock } from './ActiveSessionClock';
+import { createRuntimeClock, RuntimeClockHost, clockDiagnostic } from './RuntimeClock';
 import { latestContact, contactText } from './Feedback';
 import { BUILD_ID } from './BuildInfo';
 import { FighterPose, Point } from './ParryMotion';
@@ -19,7 +20,7 @@ import { LayoutRect, layoutFromUiSafeRect } from './GameLayout';
 import { InputObservation, InputObservationContext, InputObservationKind, InputObservationSource, inputObservationRequested } from './InputObservation';
 
 const { ccclass } = _decorator;
-type Page = 'menu' | 'practice' | 'loading' | 'intro' | 'battle' | 'paused' | 'confirm' | 'result' | 'error' | 'clip-qa';
+type Page = 'menu' | 'practice' | 'loading' | 'intro' | 'battle' | 'paused' | 'confirm' | 'result' | 'error' | 'clock-error' | 'clip-qa';
 type Practice = 'normal' | 'hit' | 'block' | 'parry';
 type Button = { transform: UITransform; label: Label; name: string; action: () => void };
 type ContactFrame = {
@@ -52,7 +53,10 @@ export class SlapGame extends Component {
     private mode: AttackMode = 'charge';
     private practice: Practice = 'normal';
     private session: LocalSession | null = null;
-    private activeClock = new ActiveSessionClock(() => performance.now());
+    private runtimeClock = createRuntimeClock(globalThis as unknown as RuntimeClockHost);
+    private activeClock = new ActiveSessionClock(() => this.runtimeClock.readMs());
+    private pendingClockAction: 'enter' | 'resume' | 'paused' | null = null;
+    private clockRetryTarget: 'enter' | 'paused' = 'enter';
     private resultVisualMs = 0;
     private skipVisualFrame = false;
     private sequence = 0;
@@ -142,6 +146,7 @@ export class SlapGame extends Component {
     private inputDiagnosticCopyStatus = '';
     private inputDiagnosticCopyLabel: Label | null = null;
     private inputDiagnosticPanelActive = false;
+    private inputDiagnosticPanelPage: Page | null = null;
     private inputDiagnosticCopyGeneration = 0;
     private wechatInputObservationApi: WechatInputObservationApi | null = null;
     private readonly observeWechatCancel = (event: WechatCancelEvent): void => {
@@ -193,7 +198,7 @@ export class SlapGame extends Component {
             inspect: () => ({ page: this.page, mode: this.mode, practice: this.practice, playerStation:this.playerStation,
                 setup: this.roundSetup, viewerActorId: this.introViewer,
                 state: this.session?.snapshot() ?? null, visualElapsedMs: this.resultVisualMs, events: this.trace.map(e => ({ ...e })), cast: this.skinEvidence(),
-                frames: this.frameDiagnostics(), input: this.inputObservation.snapshot() }),
+                frames: this.frameDiagnostics(), input: this.inputObservation.snapshot(), clock: this.runtimeClock.snapshot() }),
         };
     }
 
@@ -233,12 +238,12 @@ export class SlapGame extends Component {
     private observeInputAfterDraw(): void {
         if (!this.inputObservation.enabled || this.inputDiagnosticDisposed) return;
         try {
-            this.inputObservation.observeAfterDraw(performance.now(), Date.now(), this.inputObservationContext());
+            this.inputObservation.observeAfterDraw(this.diagnosticWallMs(), this.diagnosticUnixMs(), this.inputObservationContext());
         } catch { /* Optional render-submission observation must never affect the game. */ }
     }
 
     private copyInputDiagnostic(): void {
-        if (!this.inputObservation.enabled || this.inputDiagnosticDisposed || this.page !== 'paused' || this.inputDiagnosticCopyBusy) return;
+        if (!this.inputObservation.enabled || this.inputDiagnosticDisposed || (this.page !== 'paused' && this.page !== 'clock-error') || this.inputDiagnosticCopyBusy) return;
         const feedback = (message: string): void => {
             if (!this.inputObservation.enabled || this.inputDiagnosticDisposed) return;
             this.inputDiagnosticCopyStatus = message;
@@ -251,8 +256,17 @@ export class SlapGame extends Component {
             settled = true; this.inputDiagnosticCopyBusy = false; feedback(message);
         };
         try {
-            const data = this.inputObservation.serialize(this.inputObservationContext(), performance.now(), Date.now());
-            if (data === null) return;
+            const inputData = this.inputObservation.serialize(this.inputObservationContext(), this.diagnosticWallMs(), this.diagnosticUnixMs());
+            if (inputData === null) return;
+            // Preserve schema1 and its existing whitelist. Only this bounded clock projection is additive.
+            const payload = JSON.parse(inputData);
+            payload.clock = clockDiagnostic(this.runtimeClock.snapshot());
+            let data = JSON.stringify(payload);
+            while (data.length > this.inputObservation.maxExportChars && payload.input.records.length) {
+                payload.input.records.shift(); payload.exportTrimmedRecords++;
+                data = JSON.stringify(payload);
+            }
+            if (data.length > this.inputObservation.maxExportChars) throw new RangeError('Diagnostic export exceeds its character limit');
             this.inputDiagnosticCopyBusy = true; feedback('正在复制诊断…');
             const api = (globalThis as unknown as { wx?: DiagnosticClipboardApi }).wx;
             if (typeof api?.setClipboardData === 'function') {
@@ -268,7 +282,7 @@ export class SlapGame extends Component {
         if (!this.inputObservation.enabled || this.inputDiagnosticDisposed) return;
         try {
             this.inputObservation.record({ source, kind, phase, reportedType, pointerIds, sourceTimeStamp, cocosSimulate,
-                wallTimeMs: performance.now(), unixTimeMs: Date.now(), context: this.inputObservationContext() });
+                wallTimeMs: this.diagnosticWallMs(), unixTimeMs: this.diagnosticUnixMs(), context: this.inputObservationContext() });
             this.publishInputObservation(true);
         } catch { /* Observation must never change input handling or match state. */ }
     }
@@ -276,7 +290,7 @@ export class SlapGame extends Component {
     private publishInputObservation(force = false): void {
         if (!this.inputObservation.enabled || this.inputDiagnosticDisposed) return;
         try {
-            const wallMs = performance.now();
+            const wallMs = this.diagnosticWallMs();
             if (!force && wallMs - this.inputDiagnosticPublishedMs < 100) return;
             this.inputDiagnosticPublishedMs = wallMs;
             const observed = this.inputObservation.snapshot();
@@ -297,9 +311,19 @@ export class SlapGame extends Component {
     private frameDiagnostics() {
         return { targetFps: game.frameRate, updates: this.frameUpdates,
             firstWallMs: this.frameFirstWallMs, lastWallMs: this.frameLastWallMs,
-            wallNowMs: performance.now(), totalDtMs: this.frameTotalDtMs,
+            wallNowMs: this.diagnosticWallMs(), totalDtMs: this.frameTotalDtMs,
             minDtMs: this.frameMinDtMs, maxDtMs: this.frameMaxDtMs,
             recentDtMs: this.frameRecentDtMs.slice(), hidden: this.hidden };
+    }
+
+    // Optional diagnostic reads never throw into control flow or substitute time for battle advancement.
+    private diagnosticWallMs(): number {
+        try { const value = performance.now(); if (Number.isFinite(value)) return value; } catch { /* Retain last observation. */ }
+        return this.frameLastWallMs ?? 0;
+    }
+    private diagnosticUnixMs(): number {
+        try { const value = Date.now(); if (Number.isFinite(value)) return value; } catch { /* Unavailable Unix label. */ }
+        return 0;
     }
 
     /** Capture the engine's actual canvas after drawing, only with the explicit diagnostic query. */
@@ -737,12 +761,13 @@ export class SlapGame extends Component {
         this.attackLabel = this.guardLabel = this.statusLabel = this.resultLabel = this.timerLabel = null;
         this.hpLabels = []; this.hpBars = []; this.chargeBar = null;
         if (this.inputObservation.enabled) {
-            const active = this.page === 'paused' && !this.inputDiagnosticDisposed;
-            if (active !== this.inputDiagnosticPanelActive) {
+            const active = (this.page === 'paused' || this.page === 'clock-error') && !this.inputDiagnosticDisposed;
+            if (active !== this.inputDiagnosticPanelActive || (active && this.inputDiagnosticPanelPage !== this.page)) {
                 this.inputDiagnosticCopyGeneration++;
                 this.inputDiagnosticCopyBusy = false; this.inputDiagnosticCopyStatus = '';
             }
             this.inputDiagnosticPanelActive = active;
+            this.inputDiagnosticPanelPage = active ? this.page : null;
         }
         if(this.page==='clip-qa') {this.clipQaUI();return;}
         if (this.page === 'battle') { this.battleUI(); return; }
@@ -773,6 +798,13 @@ export class SlapGame extends Component {
             this.labelAt('对战未能启动', l.box(0, 120, 640, 80), 40);
             this.labelAt(this.startupError || '角色资源未能准备，请返回选择后重试。', l.box(0, 20, 640, 110));
             this.buttonAt('返回选择', l.target(0, -130, 520, 96), () => this.backToMenu(), true);
+        } else if (this.page === 'clock-error') {
+            const calibrating = this.runtimeClock.snapshot().status === 'calibrating';
+            this.labelAt(calibrating ? '正在准备对战计时…' : '对战计时暂不可用', l.box(0, 150, 640, 80), 40);
+            this.labelAt(this.clockRetryTarget === 'paused' ? '本局已暂停。计时准备好后，点击继续对战。' : '请稍候，计时就绪后才能开始对战。', l.box(0, 45, 640, 90));
+            if (!calibrating) this.buttonAt(this.clockRetryTarget === 'paused' ? '重新准备计时' : '重新准备并开始', l.target(0, -70, 520, 96), () => this.retryRuntimeClock(), true);
+            this.buttonAt('返回选择', l.target(0, -190, 520, 96), () => this.backToMenu());
+            this.inputDiagnosticControls();
         } else if (this.page === 'paused' || this.page === 'confirm') {
             this.labelAt(this.page === 'paused' ? '已暂停' : '放弃这局？', l.box(0, 150, 640, 80), 56);
             this.labelAt(this.page === 'paused' ? '准备好再继续。' : '本局进度不会保留。', l.box(0, 50, 640, 64));
@@ -780,12 +812,7 @@ export class SlapGame extends Component {
             this.buttonAt(this.page === 'paused' ? '返回选择' : '放弃并返回', l.target(0, -180, 520, 96),
                 () => this.page === 'paused' ? this.changePage('confirm') : this.backToMenu(), false,
                 this.page === 'confirm' ? 'danger' : 'normal');
-            if (this.page === 'paused' && this.inputObservation.enabled && !this.inputDiagnosticDisposed) {
-                this.buttonAt('复制诊断', l.target(this.landscape ? 440 : 0, this.landscape ? -180 : -300, this.landscape ? 300 : 520, 96),
-                    () => this.copyInputDiagnostic());
-                this.inputDiagnosticCopyLabel = this.labelAt(this.inputDiagnosticCopyStatus || '复制后可粘贴发回。',
-                    l.box(0, this.landscape ? -286 : -390, this.width - 40, 64), 24);
-            }
+            if (this.page === 'paused') this.inputDiagnosticControls();
         } else if (this.page === 'result') {
             const result = this.session?.snapshot().result;
             // Only header/footer panels cover the world; the real result actors
@@ -806,6 +833,15 @@ export class SlapGame extends Component {
             const buildLabel = BUILD_ID.split('-').slice(0, 3).join('-');
             this.labelAt(`构建 ${buildLabel}`, common.build, 24);
         }
+    }
+
+    private inputDiagnosticControls(): void {
+        if (!this.inputObservation.enabled || this.inputDiagnosticDisposed) return;
+        const l = this.layout;
+        this.buttonAt('复制诊断', l.target(this.landscape ? 440 : 0, this.landscape ? -180 : -300, this.landscape ? 300 : 520, 96),
+            () => this.copyInputDiagnostic());
+        this.inputDiagnosticCopyLabel = this.labelAt(this.inputDiagnosticCopyStatus || '复制后可粘贴发回。',
+            l.box(0, this.landscape ? -286 : -390, this.width - 40, 64), 24);
     }
 
     private battleUI(): void {
@@ -885,10 +921,15 @@ export class SlapGame extends Component {
 
     private enterBattle(): void {
         if (this.page !== 'intro' || !this.roundSetup || this.characterView.count !== 2) return;
+        if (!this.requireRuntimeClock('enter')) return;
         this.activeClock.freezeAt(this.session?.snapshot().nowMs ?? 0);
         this.bridge.cancelAll();
-        this.session = new LocalSession({ sessionId: `local-${++this.round}`, mode: this.roundSetup.mode, practice: this.practice, seed: 104729 });
-        this.activeClock.start(this.session.snapshot().nowMs);
+        const nextRound = this.round + 1;
+        const nextSession = new LocalSession({ sessionId: `local-${nextRound}`, mode: this.roundSetup.mode, practice: this.practice, seed: 104729 });
+        // Admission is transactional: a failing provider must not publish an uninitialised session/identity.
+        try { this.activeClock.start(nextSession.snapshot().nowMs); }
+        catch { this.runtimeClockFailed('enter'); return; }
+        this.round = nextRound; this.session = nextSession;
         this.sequence = 0; this.resultVisualMs = 0; this.skipVisualFrame = false;
         this.motion.reset(this.session.snapshot().sessionId); this.motionSamples = []; this.clearContactFrames();
         this.seenEvents.clear(); this.trace = []; this.feedback = ''; this.feedbackUntil = 0;
@@ -900,7 +941,9 @@ export class SlapGame extends Component {
         if (!this.session || this.page !== 'battle' || this.session.paused) return;
         const state = this.session.snapshot();
         if (state.result) return;
-        const atMs = this.activeClock.nowMs();
+        let atMs: number;
+        try { atMs = this.activeClock.nowMs(); }
+        catch { this.runtimeClockFailed(); return; }
         // Queue first: a guard delivered exactly at contact must retain the
         // core's command-before-contact priority. Past the round limit, only
         // settle the result; do not emit invalid-time or ended commands.
@@ -968,14 +1011,53 @@ export class SlapGame extends Component {
     private resume(): void {
         if (!this.session || this.hidden || (this.page !== 'paused' && this.page !== 'confirm')) return;
         this.bridge.cancelAll();
-        this.activeClock.resume(this.session.snapshot().nowMs);
+        if (!this.requireRuntimeClock('resume')) return;
+        try { this.activeClock.resume(this.session.snapshot().nowMs); }
+        catch { this.runtimeClockFailed(); return; }
         this.session.resume();
         this.changePage('battle');
+    }
+    private requireRuntimeClock(action: 'enter' | 'resume'): boolean {
+        if (this.runtimeClock.snapshot().status === 'ready') return true;
+        this.clockRetryTarget = action === 'enter' ? 'enter' : 'paused';
+        this.pendingClockAction = this.runtimeClock.snapshot().status === 'calibrating' ? action : null;
+        this.changePage('clock-error');
+        return false;
+    }
+    private runtimeClockFailed(retryTarget: 'enter' | 'paused' = this.session ? 'paused' : 'enter'): void {
+        // Freeze before clearing held pointers: cancellation can synchronously submit.
+        this.activeClock.freezeAt(this.session?.snapshot().nowMs ?? 0);
+        this.bridge.cancelAll(); this.session?.pause(); this.pendingClockAction = null;
+        this.clockRetryTarget = retryTarget;
+        if (this.page !== 'clock-error') this.changePage('clock-error');
+    }
+    private retryRuntimeClock(): void {
+        if (this.page !== 'clock-error' || this.hidden) return;
+        this.activeClock.freezeAt(this.session?.snapshot().nowMs ?? 0);
+        this.bridge.cancelAll(); this.session?.pause();
+        this.runtimeClock.beginCalibration();
+        this.pendingClockAction = this.clockRetryTarget === 'paused' ? 'paused' : this.roundSetup ? 'enter' : null;
+        this.renderPage();
+    }
+    private pollRuntimeClock(): void {
+        if (this.hidden) return;
+        const previous = this.runtimeClock.snapshot().status;
+        this.runtimeClock.pollCalibration();
+        const status = this.runtimeClock.snapshot().status;
+        if (status === 'ready' && this.pendingClockAction && this.page === 'clock-error') {
+            const action = this.pendingClockAction; this.pendingClockAction = null;
+            this.bridge.cancelAll();
+            if (action === 'paused') this.changePage('paused');
+            else {
+                this.page = action === 'enter' ? 'intro' : 'paused';
+                if (action === 'enter') this.enterBattle(); else this.resume();
+            }
+        } else if (status !== previous && this.page === 'clock-error') this.renderPage();
     }
     private backToMenu(): void {
         if(this.page==='clip-qa') {this.clipQaClose=false;this.setClipQaCamera(false);}
         this.motionDiagnosticCanvas?.removeAttribute('data-slap-clip-qa');
-        ++this.loadGeneration;
+        ++this.loadGeneration; this.pendingClockAction = null;
         this.roundGate.clear(); this.roundSetup = null;
         this.activeClock.freezeAt(this.session?.snapshot().nowMs ?? 0);
         this.bridge.cancelAll(); this.session?.pause(); this.session = null;
@@ -988,20 +1070,26 @@ export class SlapGame extends Component {
     }
     private hide(): void {
         this.observeInput('cocos-game', 'game-hide', 'before', Game.EVENT_HIDE);
-        this.hidden = true; this.skipVisualFrame = true; this.pause();
+        this.hidden = true; this.skipVisualFrame = true; this.pendingClockAction = null;
+        this.runtimeClock.interruptCalibration(); this.pause();
         this.observeInput('cocos-game', 'game-hide', 'after', Game.EVENT_HIDE);
     }
     private show(): void {
         this.observeInput('cocos-game', 'game-show', 'before', Game.EVENT_SHOW);
         this.hidden = false; this.skipVisualFrame = true; /* Only Continue resumes an active match. */
+        if (this.runtimeClock.snapshot().status === 'suspended') {
+            this.runtimeClock.beginCalibration();
+            if (this.page === 'clock-error') this.renderPage();
+        }
         this.observeInput('cocos-game', 'game-show', 'after', Game.EVENT_SHOW);
     }
 
     update(dt: number): void {
         this.publishInputObservation();
+        this.pollRuntimeClock();
         // Observe actual Component updates even on menus/paused screens. These
         // counters never control simulation time or submit gameplay commands.
-        const wallMs = performance.now();
+        const wallMs = this.diagnosticWallMs();
         const dtMs = dt * 1000;
         this.frameUpdates++;
         if (this.frameFirstWallMs === null) this.frameFirstWallMs = wallMs;
@@ -1035,7 +1123,10 @@ export class SlapGame extends Component {
             this.publishFrameDiagnostics(wallMs);
             return;
         }
-        this.session.advanceTo(this.activeClock.nowMs());
+        let nowMs: number;
+        try { nowMs = this.activeClock.nowMs(); }
+        catch { this.runtimeClockFailed(); return; }
+        this.session.advanceTo(nowMs);
         this.presentSession();
         this.publishFrameDiagnostics(wallMs);
     }
@@ -1139,6 +1230,7 @@ export class SlapGame extends Component {
         input.off(Input.EventType.TOUCH_CANCEL, this.touchCancel, this);
         game.off(Game.EVENT_HIDE, this.hide, this); game.off(Game.EVENT_SHOW, this.show, this);
         view.off('canvas-resize', this.resize, this);
+        this.pendingClockAction = null; this.runtimeClock.interruptCalibration();
         this.activeClock.freezeAt(this.session?.snapshot().nowMs ?? 0);
         this.bridge.cancelAll(); this.session?.pause();
         this.motion.reset();

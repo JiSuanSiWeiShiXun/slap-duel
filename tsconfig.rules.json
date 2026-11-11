@@ -10,5 +10,5 @@
     "outDir": ".test-build",
     "lib": ["ES2020"]
   },
-  "include": ["game/assets/scripts/core/**/*.ts", "game/assets/scripts/session/**/*.ts", "game/assets/scripts/InputBridge.ts", "game/assets/scripts/InputObservation.ts", "game/assets/scripts/ActiveSessionClock.ts", "game/assets/scripts/Feedback.ts", "game/assets/scripts/ParryMotion.ts", "game/assets/scripts/CharacterTimeline.ts", "game/assets/scripts/Cast.ts", "game/assets/scripts/GameLayout.ts"]
+  "include": ["game/assets/scripts/core/**/*.ts", "game/assets/scripts/session/**/*.ts", "game/assets/scripts/InputBridge.ts", "game/assets/scripts/InputObservation.ts", "game/assets/scripts/ActiveSessionClock.ts", "game/assets/scripts/RuntimeClock.ts", "game/assets/scripts/Feedback.ts", "game/assets/scripts/ParryMotion.ts", "game/assets/scripts/CharacterTimeline.ts", "game/assets/scripts/Cast.ts", "game/assets/scripts/GameLayout.ts"]
 }

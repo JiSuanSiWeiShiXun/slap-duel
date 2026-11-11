@@ -10,7 +10,7 @@ const { LocalSession } = require('../.test-build/session/LocalSession.js');
 
 // Actual diagnostic/UI/lifecycle methods with display and platform API stubs.
 // This proves wiring and isolation, not physical device visibility or clipboard permission.
-function fixture({ enabled = true, wx, browser = false, clipboard } = {}) {
+function fixture({ enabled = true, wx, browser = false, clipboard, performance } = {}) {
     let wall = 10000;
     const listeners = [], removed = [], controls = [];
     const nativeCancel = [];
@@ -28,7 +28,7 @@ function fixture({ enabled = true, wx, browser = false, clipboard } = {}) {
         module: ts.ModuleKind.CommonJS, experimentalDecorators: true, useDefineForClassFields: false } }).outputText;
     const module = { exports: {} };
     vm.runInNewContext(compiled, { module, exports: module.exports, console, Date, wx: api,
-        navigator: clipboard ? { clipboard } : undefined, performance: { now: () => wall },
+        navigator: clipboard ? { clipboard } : undefined, performance: performance ?? { now: () => wall },
         require(name) {
             if (name === 'cc') return cc;
             if (name === './CharacterView') return { CharacterView: class { clear() {} } };
@@ -90,6 +90,105 @@ test('wx copy exports draw-before-hide HP evidence and reports success only afte
     request.fail(); assert.match(f.game.inputDiagnosticCopyStatus, /已复制/); // first completion wins
     assert.deepEqual(f.game.session.snapshot(), before);
     assert.equal(f.game.sequence, 0);
+});
+
+test('copy includes bounded clock provider and failure evidence for phone verification', () => {
+    let request;
+    const f = fixture({ wx: { setClipboardData(options) { request = options; } } });
+    f.game.prepareInputObservation('1'); f.game.copyInputDiagnostic();
+    const data = JSON.parse(request.data);
+    assert.equal(data.schemaVersion, 1);
+    assert.equal(data.clock.provider, 'wx-performance');
+    assert.equal(data.clock.status, 'unavailable');
+    assert.equal(data.clock.reason, 'missing-api');
+    assert.equal(data.clock.calibration.length, 0);
+    assert.ok(request.data.length <= f.game.inputObservation.maxExportChars);
+});
+
+test('phone copy preserves calibrated ms/us native evidence and one failed raw without reading the clock', () => {
+    const { RuntimeClock } = require('../.test-build/RuntimeClock.js');
+    for (const scale of [1, 1000]) {
+        let raw = 10000 * scale, unix = 1700000000000, reads = 0, request;
+        const perf = { now() { assert.equal(this, perf); reads++; return raw; } };
+        const api = { getPerformance: () => perf, getDeviceInfo: () => ({ platform: 'ios', secret: 'PRIVATE-SYSTEM' }),
+            setClipboardData(options) { request = options; } };
+        const f = fixture({ wx: api }); f.game.prepareInputObservation('1');
+        const clock = new RuntimeClock({ wx: api, Date: { now: () => unix } });
+        clock.pollCalibration();
+        for (let n = 0; n < 2; n++) { raw += 150 * scale; unix += 150; clock.pollCalibration(); }
+        raw -= 1; assert.throws(() => clock.readMs());
+        f.game.runtimeClock = clock; f.game.page = 'clock-error'; f.game.renderPage();
+        assert.equal(f.controls.filter(c => c.name === '复制诊断').length, 1);
+        const before = f.game.session.snapshot(), beforeReads = reads;
+        f.controls.find(c => c.name === '复制诊断').action();
+        const data = JSON.parse(request.data);
+        assert.equal(data.clock.provider, 'wx-performance'); assert.equal(data.clock.status, 'invalid');
+        assert.equal(data.clock.reason, 'backward'); assert.equal(data.clock.rawUnit, scale === 1 ? 'ms' : 'us');
+        assert.equal(data.clock.scaleToMs, 1 / scale);
+        assert.equal(data.clock.calibration.length, 3); assert.deepEqual(data.clock.calibrationRatios, [scale, scale]);
+        assert.equal(data.clock.failure.lastGoodRaw, 10300 * scale);
+        assert.equal(data.clock.failure.observedRaw, 10300 * scale - 1);
+        assert.equal(request.data.includes('PRIVATE-SYSTEM'), false);
+        assert.equal(reads, beforeReads); assert.deepEqual(f.game.session.snapshot(), before);
+    }
+});
+
+test('clock-error export works even when the shared browser performance provider still throws', async () => {
+    let fault = false, copied;
+    const performance = { now() { if (fault) throw Error('PRIVATE-PERFORMANCE'); return 10000; } };
+    const f = fixture({ wx: null, browser: true, performance,
+        clipboard: { writeText(data) { copied = data; return Promise.resolve(); } } });
+    fault = true; assert.throws(() => f.game.runtimeClock.readMs());
+    f.game.page = 'clock-error'; f.game.renderPage();
+    const before = f.game.session.snapshot();
+    assert.doesNotThrow(() => f.game.copyInputDiagnostic()); await Promise.resolve();
+    const data = JSON.parse(copied);
+    assert.equal(data.clock.provider, 'browser-performance'); assert.equal(data.clock.status, 'invalid');
+    assert.equal(data.clock.failure.reason, 'thrown'); assert.equal(data.clock.failure.lastGoodRaw, 10000);
+    assert.equal(copied.includes('PRIVATE-PERFORMANCE'), false);
+    assert.match(f.game.inputDiagnosticCopyStatus, /已复制/); assert.deepEqual(f.game.session.snapshot(), before);
+});
+
+test('adding clock evidence preserves schema1 privacy and the total character cap without editing the observation ring', t => {
+    for (const [label, long] of [['escaped', '\u0000'.repeat(10000)], ['Chinese', '计时'.repeat(10000)]]) {
+        let request;
+        const f = fixture({ wx: { setClipboardData(options) { request = options; } } }); f.game.prepareInputObservation('1');
+        const current = f.game.inputObservationContext();
+        const worst = { ...current, page: long, mode: long, practice: long, sessionId: long,
+            token: 'PRIVATE-INPUT', system: { token: 'PRIVATE-INPUT' },
+            fighters: current.fighters.map(x => ({ ...x, phase: long })),
+            recentEvents: Array.from({ length: 8 }, () => ({ id: long, kind: long, atMs: 1, actorId: 0, targetId: 1, damage: 1 })) };
+        f.game.inputObservationContext = () => worst;
+        f.game.inputObservation.observeAfterDraw(1, 2, worst);
+        for (let n = 0; n < 96; n++) f.game.inputObservation.record({ source: 'cocos-input', kind: 'touch-start', phase: 'before',
+            reportedType: long, pointerIds: [1], sourceTimeStamp: 1, wallTimeMs: n, unixTimeMs: n + 10000,
+            cocosSimulate: false, context: worst });
+        const snapshot = f.game.inputObservation.snapshot();
+        const legacy = JSON.parse(f.game.inputObservation.serialize(worst, 0, 0));
+        const clockSnapshot = f.game.runtimeClock.snapshot();
+        f.game.runtimeClock.snapshot = () => ({ ...clockSnapshot, secret: 'PRIVATE-CLOCK', platform: { token: 'PRIVATE-CLOCK' } });
+        f.game.copyInputDiagnostic();
+        const data = JSON.parse(request.data);
+        assert.equal(data.schemaVersion, 1); assert.equal(data.clock.schemaVersion, 1);
+        assert.ok(request.data.length <= f.game.inputObservation.maxExportChars);
+        assert.ok(data.exportTrimmedRecords >= legacy.exportTrimmedRecords);
+        assert.deepEqual(data.current, legacy.current);
+        assert.deepEqual(f.game.inputObservation.snapshot(), snapshot);
+        assert.equal(request.data.includes('PRIVATE-'), false);
+        const bytes = Buffer.byteLength(request.data, 'utf8');
+        if (label === 'Chinese') assert.ok(bytes > request.data.length);
+        t.diagnostic(`${label}: ${request.data.length} UTF-16 characters (cap196608), ${bytes} UTF-8 bytes (not the cap unit)`);
+    }
+});
+
+test('clock-error and paused panels reject old clipboard callbacks across their boundary', () => {
+    const requests = [], f = fixture({ wx: { setClipboardData(options) { requests.push(options); } } });
+    f.game.prepareInputObservation('1'); f.game.renderPage(); f.game.copyInputDiagnostic();
+    f.game.page = 'clock-error'; f.game.renderPage();
+    assert.equal(f.game.inputDiagnosticCopyStatus, '');
+    requests[0].success(); assert.equal(f.game.inputDiagnosticCopyStatus, '');
+    f.game.copyInputDiagnostic(); requests[1].success(); assert.match(f.game.inputDiagnosticCopyStatus, /已复制/);
+    f.game.page = 'paused'; f.game.renderPage(); assert.equal(f.game.inputDiagnosticCopyStatus, '');
 });
 
 test('copy failure, thrown API, absent API and pending duplicate are distinct from success', () => {

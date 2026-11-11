@@ -11,8 +11,23 @@ const ts = require(path.resolve(path.dirname(compiler), '../lib/typescript.js'))
 // are stubbed; LocalSession, Battle, Bot, InputBridge and clock are real modules.
 // The optional source override is test-process-only for replaying the retained
 // pre-fix bytes, never a production input or a live game's write/debug API.
-function fixture(mode = 'charge', practice = 'hit') {
+function fixture(mode = 'charge', practice = 'hit', clockOptions = {}) {
     let wall = 10000;
+    let unix = 1700000010000, unixShift = 0, wallBase = wall, unixBase = unix;
+    let nativeFault = null, nativeReads = 0, renders = 0;
+    const nativePerformance = { now() {
+        nativeReads++;
+        assert.equal(this, nativePerformance, 'native now must retain its receiver');
+        if (nativeFault === 'throw') throw Error('native unavailable');
+        if (nativeFault === 'nan') return NaN;
+        if (nativeFault === 'backward') return (wallBase - 1) * (clockOptions.unit === 'us' ? 1000 : 1);
+        return wall * (clockOptions.unit === 'us' ? 1000 : 1);
+    } };
+    class HostDate extends Date { static now() { return unix; } }
+    const wx = clockOptions.wechat ? {
+        getPerformance: () => nativePerformance,
+        getDeviceInfo: () => ({ platform: clockOptions.unit === 'us' ? 'ios' : 'devtools', privateDeviceField: 'not-retained' }),
+    } : undefined;
     const source = fs.readFileSync(process.env.SLAP_CLOCK_TEST_SOURCE || path.join(root, 'game/assets/scripts/SlapGame.ts'), 'utf8');
     const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2020,
         module: ts.ModuleKind.CommonJS, experimentalDecorators: true, useDefineForClassFields: false } }).outputText;
@@ -20,7 +35,7 @@ function fixture(mode = 'charge', practice = 'hit') {
     const cc = { _decorator: { ccclass: () => value => value }, Component: class {},
         game: { frameRate: 60 }, Game: { EVENT_HIDE: 'game-hide', EVENT_SHOW: 'game-show' } };
     vm.runInNewContext(compiled, { exports: module.exports, module, console,
-        performance: { now: () => wall }, Date,
+        performance: clockOptions.wechat ? { now: () => unix } : nativePerformance, Date: HostDate, wx,
         require(name) {
             if (name === 'cc') return cc;
             if (name === './CharacterView') return { CharacterView: class { count = 2; sample() {} } };
@@ -34,16 +49,194 @@ function fixture(mode = 'charge', practice = 'hit') {
     game.page = 'intro';
     game.roundSetup = { mode };
     game.practice = practice;
-    game.renderPage = () => {};
+    game.renderPage = () => { renders++; };
     game.drawState = state => { game.drawn = state; };
     game.publishInputObservation = game.publishCastDiagnostics = game.publishFrameDiagnostics = () => {};
+    if (game.runtimeClock && clockOptions.wechat && clockOptions.calibrate !== false) {
+        game.runtimeClock.beginCalibration();
+        game.runtimeClock.pollCalibration();
+        for (const elapsed of [150, 300]) {
+            wall = 10000 + elapsed; unix = 1700000010000 + elapsed;
+            game.runtimeClock.pollCalibration();
+        }
+        wallBase = wall; unixBase = unix;
+    }
     game.enterBattle();
-    return { game, at(ms) { wall = 10000 + ms; },
-        tick(ms, dt = 1 / 60) { wall = 10000 + ms; game.update(dt); },
+    const at = ms => { wall = wallBase + ms; unix = unixBase + ms + unixShift; };
+    return { game, at,
+        tick(ms, dt = 1 / 60) { at(ms); game.update(dt); },
+        jumpUnix(ms) { unixShift += ms; unix += ms; },
+        fault(kind) { nativeFault = kind; },
+        reads() { return nativeReads; }, renders() { return renders; },
         state() { return game.session.snapshot(); },
         events() { return game.trace; },
         hit() { return game.trace.find(e => e.kind === 'hit' && e.actorId === 0); } };
 }
+
+test('wechat battle elapsed ignores a post-start Date jump using native elapsed time', () => {
+    for (const unit of ['ms', 'us']) {
+        const f = fixture('charge', 'hit', { wechat: true, unit });
+        f.game.bridge.downAttack(1, 'charge'); f.tick(100);
+        f.jumpUnix(60000); f.tick(200);
+        assert.equal(f.state().nowMs, 200, `native ${unit}: Unix forward step must not fast-forward battle`);
+        assert.equal(f.state().result, null);
+        f.at(1200); f.game.bridge.up(1); f.tick(1680);
+        assert.equal(f.hit()?.damage, 2);
+        assert.equal(f.hit()?.atMs, 1680);
+    }
+});
+
+test('browser shared performance failure cannot escape diagnostics before the battle freezes', () => {
+    const f = fixture('charge', 'parry');
+    f.game.bridge.downAttack(7, 'charge'); f.tick(1541);
+    f.fault('throw'); f.at(2475);
+    assert.doesNotThrow(() => f.game.update(1 / 60));
+    assert.equal(f.game.page, 'clock-error'); assert.equal(f.game.session.paused, true);
+    assert.equal(f.state().nowMs, 1541); assert.equal(f.state().fighters[0].hp, 5);
+    assert.equal(f.state().fighters[0].phase, 'idle');
+    assert.equal(f.game.runtimeClock.snapshot().status, 'invalid');
+    assert.doesNotThrow(() => f.game.frameDiagnostics());
+});
+
+test('real begin and failed enter commit no partial session, then retry initializes a fresh complete round', async () => {
+    const f = fixture('charge', 'parry', { wechat: true });
+    f.game.bridge.downAttack(7, 'charge'); f.at(1200); f.game.bridge.up(7); f.tick(1300);
+    const oldId = f.state().sessionId, oldRound = f.game.round;
+    assert.ok(f.game.sequence > 0);
+    let scheduled;
+    f.game.catalog = { manager: { roleId: 'manager', facets: { positive: 'p', negative: 'n' } } };
+    f.game.isValid = true;
+    f.game.clearActors = () => {};
+    f.game.prepareActors = async () => {};
+    f.game.scheduleOnce = callback => { scheduled = callback; };
+    f.game.page = 'menu'; f.game.begin('parry');
+    assert.equal(f.game.page, 'loading'); assert.equal(f.game.session, null);
+    assert.equal(f.game.trace.length, 0); assert.equal(f.game.motion.sessionId, null);
+    await scheduled(); assert.equal(f.game.page, 'intro');
+    f.fault('throw'); f.game.enterBattle();
+    assert.equal(f.game.page, 'clock-error'); assert.equal(f.game.session, null);
+    assert.equal(f.game.clockRetryTarget, 'enter'); assert.equal(f.game.round, oldRound);
+    f.fault(null); f.game.retryRuntimeClock(); f.tick(10000); f.tick(10150); f.tick(10300);
+    assert.equal(f.game.page, 'battle'); assert.equal(f.game.session.paused, false);
+    assert.notEqual(f.state().sessionId, oldId); assert.equal(f.game.motion.sessionId, f.state().sessionId);
+    assert.equal(f.game.sequence, 0); assert.equal(f.state().nowMs, 0);
+    assert.equal(f.events().length, 0); assert.equal(f.game.round, oldRound + 1);
+    f.game.bridge.up(7); assert.equal(f.game.sequence, 0);
+});
+
+test('wx cold startup waits for two observed intervals without creating a Battle or forcing retry', () => {
+    const f = fixture('tap', 'hit', { wechat: true, calibrate: false });
+    assert.equal(f.game.session, null);
+    assert.equal(f.game.page, 'clock-error');
+    f.tick(8000); assert.equal(f.game.session, null);
+    assert.equal(f.game.runtimeClock.snapshot().status, 'calibrating');
+    f.tick(8150); assert.equal(f.game.session, null);
+    f.tick(8300); assert.equal(f.game.page, 'battle');
+    assert.equal(f.state().nowMs, 0); assert.equal(f.game.sequence, 0);
+    f.tick(8400); assert.equal(f.state().nowMs, 100);
+});
+
+test('wx clock loss freezes resolved state before clearing charge, with no repeated reads or late release', () => {
+    for (const unit of ['ms', 'us']) for (const fault of ['throw', 'nan', 'backward']) for (const delivery of ['update', 'input']) {
+        const f = fixture('charge', 'parry', { wechat: true, unit });
+        f.game.bridge.downAttack(7, 'charge'); f.tick(1541); // enemy contact in139ms
+        f.fault(fault); f.at(2475);
+        if (delivery === 'update') assert.doesNotThrow(() => f.game.update(1 / 60));
+        else assert.doesNotThrow(() => f.game.bridge.up(7));
+        assert.equal(f.game.page, 'clock-error'); assert.equal(f.game.session.paused, true);
+        assert.equal(f.state().nowMs, 1541); assert.equal(f.state().fighters[0].hp, 5);
+        assert.equal(f.state().fighters[0].phase, 'idle');
+        const frozen = f.state(), reads = f.reads(), renders = f.renders();
+        f.tick(10000); f.tick(20000); f.game.bridge.up(7);
+        assert.deepEqual(f.state(), frozen);
+        assert.equal(f.reads(), reads); assert.equal(f.renders(), renders);
+        assert.equal(f.events().some(e => e.kind === 'attack-start' && e.actorId === 0), false);
+        f.fault(null); f.game.retryRuntimeClock();
+        f.tick(21000); f.tick(21150); f.tick(21300);
+        assert.equal(f.game.page, 'paused'); assert.equal(f.state().nowMs, 1541);
+        f.at(22000); f.game.resume(); assert.equal(f.game.page, 'battle');
+        f.tick(22138); assert.equal(f.state().fighters[0].hp, 5);
+        f.tick(22139); assert.equal(f.state().fighters[0].hp, 4);
+        assert.equal(f.events().filter(e => e.kind === 'hit' && e.actorId === 1).length, 1);
+    }
+});
+
+test('failed resume and explicit retry preserve released windup timing on the fixed native provider', () => {
+    const f = fixture('tap', 'hit', { wechat: true, unit: 'us' });
+    f.game.bridge.downAttack(2, 'tap'); f.game.bridge.up(2); f.tick(100); f.game.pause();
+    f.fault('throw'); assert.doesNotThrow(() => f.game.resume());
+    assert.equal(f.game.page, 'clock-error'); assert.equal(f.state().nowMs, 100);
+    f.fault(null); f.game.retryRuntimeClock();
+    f.tick(10000); f.tick(10150); f.tick(10300);
+    assert.equal(f.game.page, 'paused');
+    f.at(11000); f.game.resume();
+    f.tick(11379); assert.equal(f.state().fighters[1].hp, 5);
+    f.tick(11380); assert.equal(f.state().fighters[1].hp, 4);
+});
+
+test('hide discards incomplete clock windows and pending start/resume intent until explicit action', () => {
+    const first = fixture('tap', 'hit', { wechat: true, calibrate: false });
+    first.tick(0); first.tick(150); first.game.hide(); first.tick(10000);
+    assert.equal(first.game.runtimeClock.snapshot().status, 'suspended');
+    first.game.show(); first.tick(20000); first.tick(20150); first.tick(20300);
+    assert.equal(first.game.runtimeClock.snapshot().status, 'ready');
+    assert.equal(first.game.session, null); assert.equal(first.game.page, 'clock-error');
+    first.game.retryRuntimeClock(); first.tick(21000); first.tick(21150); first.tick(21300);
+    assert.equal(first.game.page, 'battle'); assert.equal(first.state().nowMs, 0);
+
+    const resume = fixture('charge', 'hit', { wechat: true });
+    resume.game.bridge.downAttack(7, 'charge'); resume.tick(100); resume.fault('throw'); resume.tick(200);
+    resume.fault(null); resume.game.retryRuntimeClock(); resume.tick(300); resume.game.hide();
+    resume.game.show(); resume.tick(10000); resume.tick(10150); resume.tick(10300);
+    assert.equal(resume.game.page, 'clock-error'); assert.equal(resume.game.session.paused, true);
+    resume.game.bridge.up(7); assert.equal(resume.events().some(e => e.kind === 'attack-start'), false);
+});
+
+test('wx ready provider retains scale and excludes hidden duration, and fresh rounds clear old touch identity', () => {
+    for (const unit of ['ms', 'us']) {
+        const f = fixture('charge', 'hit', { wechat: true, unit });
+        f.game.bridge.downAttack(7, 'charge'); f.tick(500); f.game.hide();
+        const scale = f.game.runtimeClock.snapshot().scaleToMs;
+        f.jumpUnix(-60000); f.tick(90000); f.game.show();
+        assert.equal(f.game.page, 'paused'); f.game.bridge.up(7);
+        f.at(91000); f.game.resume(); f.tick(91200);
+        assert.equal(f.state().nowMs, 700); assert.equal(f.game.runtimeClock.snapshot().scaleToMs, scale);
+        const old = f.state().sessionId;
+        f.at(95000); f.game.page = 'intro'; f.game.enterBattle();
+        assert.notEqual(f.state().sessionId, old); assert.equal(f.state().nowMs, 0);
+        f.game.bridge.up(7); assert.equal(f.game.sequence, 0);
+        f.game.bridge.downAttack(7, 'charge'); f.at(96200); f.game.bridge.up(7); f.tick(96680);
+        assert.equal(f.hit()?.damage, 2); assert.equal(f.hit()?.atMs, 1680);
+    }
+});
+
+test('clock retry only prepares a paused session; calibration touches and Date drift never auto-resume', () => {
+    const f = fixture('charge', 'hit', { wechat: true });
+    f.game.bridge.downAttack(7, 'charge'); f.tick(300); f.fault('throw'); f.tick(400);
+    f.fault(null); f.game.retryRuntimeClock();
+    f.tick(1000); f.game.bridge.downAttack(7, 'charge'); f.tick(1150); f.tick(1300);
+    assert.equal(f.game.page, 'paused'); assert.equal(f.game.session.paused, true);
+    f.game.bridge.up(7); const frozen = f.state();
+    f.jumpUnix(60000); f.tick(5000);
+    assert.deepEqual(f.state(), frozen); assert.equal(f.events().some(e => e.kind === 'attack-start'), false);
+    f.at(6000); f.game.resume(); f.tick(6100);
+    assert.equal(f.game.page, 'battle'); assert.equal(f.state().nowMs, 400);
+    assert.equal(f.events().some(e => e.kind === 'attack-start'), false);
+});
+
+test('an explicit Continue can await clock readiness, but hide revokes that pending continuation', () => {
+    for (const interrupted of [false, true]) {
+        const f = fixture('tap', 'hit', { wechat: true });
+        f.tick(300); f.game.pause(); f.game.runtimeClock.beginCalibration();
+        f.at(10000); f.game.resume(); assert.equal(f.game.page, 'clock-error');
+        f.tick(10000); f.tick(10150);
+        if (interrupted) { f.game.hide(); f.game.show(); f.tick(20000); f.tick(20150); f.tick(20300); }
+        else f.tick(10300);
+        assert.equal(f.game.page, interrupted ? 'clock-error' : 'battle');
+        assert.equal(f.game.session.paused, interrupted);
+        assert.equal(f.state().nowMs, 300);
+    }
+});
 
 test('actual charge callbacks use wall hold duration across a >1s clamped render gap', () => {
     const f = fixture();
