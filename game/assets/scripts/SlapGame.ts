@@ -948,7 +948,11 @@ export class SlapGame extends Component {
         const id = event.getID();
         const simulate = typeof event.simulate === 'boolean' ? event.simulate : null;
         this.observeInput('cocos-input', 'touch-cancel', 'before', event.type, id === null ? [] : [id], null, simulate);
-        if (id !== null) this.bridge.cancel(id);
+        // Loss of local touch control can precede EVENT_HIDE. Pause first so
+        // cleanup freezes at the resolved snapshot rather than catching up a hit.
+        // Every cancel clears all pointers, including an absent/already released ID.
+        if (this.page === 'battle' && this.session) this.pause();
+        else this.bridge.cancelAll();
         this.observeInput('cocos-input', 'touch-cancel', 'after', event.type, id === null ? [] : [id], null, simulate);
     }
 

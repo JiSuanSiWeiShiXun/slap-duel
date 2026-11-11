@@ -194,3 +194,111 @@ test('normal bot keeps identical transcript under different render schedules wit
     assert.equal(sparse.events.filter(e => e.kind === 'parry').length, 1);
     assert.equal(sparse.events.filter(e => e.kind === 'counter-hit').length, 1);
 });
+
+const touch = (id, simulate) => ({ getID: () => id, type: 'touch-cancel', simulate });
+
+test('TOUCH_CANCEL during released windup freezes the139ms threat before a934ms delayed hide', () => {
+    const f = fixture('charge', 'parry');
+    f.at(1000); f.game.bridge.downAttack(7, 'charge');
+    f.tick(1355); f.game.touchEnd({ ...touch(7), type: 'touch-end' });
+    assert.equal(f.game.page, 'battle'); // ordinary release remains an attack, not a pause
+    f.tick(1541);
+    assert.equal(f.state().fighters[0].phase, 'windup');
+    assert.equal(f.state().fighters[0].contactAtMs, 1835);
+    assert.equal(f.state().fighters[1].contactAtMs - f.state().nowMs, 139);
+    f.game.touchCancel(touch(7)); // pointer was already released: cancellation still ends local control
+    assert.equal(f.game.page, 'paused');
+    const frozen = f.state();
+    assert.equal(frozen.nowMs, 1541);
+    assert.equal(frozen.fighters[0].contactAtMs, 1835); // do not revoke an already released attack
+    f.tick(2475); // cancel→system hide gap934ms cannot continue gameplay
+    assert.deepEqual(f.state(), frozen);
+    f.game.hide(); f.tick(50000); f.game.show();
+    assert.deepEqual(f.state(), frozen);
+    assert.equal(f.game.page, 'paused');
+    f.at(60000); f.game.resume();
+    f.tick(60138); assert.equal(f.state().fighters[0].hp, 5);
+    f.tick(60139); assert.equal(f.state().fighters[0].hp, 4);
+    assert.equal(f.events().filter(e => e.kind === 'hit' && e.actorId === 1).length, 1);
+    assert.equal(f.events().find(e => e.kind === 'hit' && e.actorId === 1).atMs, 1680);
+});
+
+test('TOUCH_CANCEL freezes before held-charge cleanup can catch up a pending hit', () => {
+    const f = fixture('charge', 'parry');
+    f.at(1000); f.game.bridge.downAttack(7, 'charge');
+    f.tick(1541);
+    assert.equal(f.state().fighters[0].phase, 'charging');
+    f.at(2475); // callback wall clock is already past the contact; last resolved snapshot is safe
+    f.game.touchCancel(touch(7));
+    assert.equal(f.game.page, 'paused');
+    assert.equal(f.state().nowMs, 1541);
+    assert.equal(f.state().fighters[0].phase, 'idle');
+    assert.equal(f.state().fighters[0].hp, 5);
+    f.game.touchEnd({ ...touch(7), type: 'touch-end' });
+    f.game.hide(); f.game.show(); f.at(3000); f.game.resume();
+    f.tick(3138); assert.equal(f.state().fighters[0].hp, 5);
+    f.tick(3139); assert.equal(f.state().fighters[0].hp, 4);
+    assert.equal(f.events().some(e => e.kind === 'attack-start' && e.actorId === 0), false);
+});
+
+test('TOUCH_CANCEL null/unknown IDs clear all pointers and repeated lifecycle callbacks never revive old input', () => {
+    for (const id of [null, 99]) {
+        const f = fixture();
+        f.game.bridge.downAttack(1, 'charge'); f.game.bridge.downGuard(2);
+        f.tick(500); f.game.touchCancel(touch(id));
+        assert.equal(f.game.page, 'paused');
+        assert.equal(f.state().fighters[0].phase, 'idle');
+        const frozen = f.state(), sequence = f.game.sequence;
+        for (let n = 0; n < 3; n++) {
+            f.game.touchCancel(touch(id)); f.game.hide(); f.game.show();
+            f.game.touchEnd({ ...touch(1), type: 'touch-end' });
+            f.game.touchEnd({ ...touch(2), type: 'touch-end' });
+            f.tick(10000 + n * 1000);
+            assert.deepEqual(f.state(), frozen);
+            assert.equal(f.game.sequence, sequence);
+        }
+        f.at(20000); f.game.resume(); f.tick(22000);
+        assert.deepEqual(f.state().fighters.map(x => x.hp), [5, 5]);
+        assert.equal(f.events().some(e => e.kind === 'attack-start'), false);
+        // Reusing both old IDs is legal only because all pointer ownership was cleared.
+        f.game.bridge.downGuard(2); assert.equal(f.state().fighters[0].phase, 'guard');
+        f.game.bridge.up(2); f.tick(22300);
+        f.game.bridge.downAttack(1, 'charge'); assert.equal(f.state().fighters[0].phase, 'charging');
+    }
+});
+
+test('TOUCH_CANCEL pauses both control modes and mouse/unsimulated delivery without diagnostic dependence', () => {
+    const { InputObservation } = require('../.test-build/InputObservation.js');
+    for (const mode of ['tap', 'charge']) for (const simulate of [true, false, undefined]) for (const enabled of [false, true]) {
+        const f = fixture(mode);
+        f.game.inputObservation = new InputObservation(enabled, 'unit-clock-test');
+        f.game.bridge.downAttack(3, mode);
+        f.tick(100); f.game.touchCancel(touch(null, simulate));
+        assert.equal(f.game.page, 'paused');
+        const frozen = f.state();
+        if (mode === 'charge') assert.equal(frozen.fighters[0].phase, 'idle');
+        else assert.equal(frozen.fighters[0].contactAtMs, 480);
+        f.tick(10000); assert.deepEqual(f.state(), frozen);
+        f.game.touchEnd({ ...touch(3, simulate), type: 'touch-end' });
+        f.at(20000); f.game.resume(); f.tick(20379);
+        assert.equal(f.state().fighters[1].hp, 5);
+        f.tick(20380);
+        assert.equal(f.state().fighters[1].hp, mode === 'tap' ? 4 : 5);
+    }
+});
+
+test('TOUCH_CANCEL outside battle safely clears held pointers without navigating or submitting gameplay', () => {
+    const f = fixture();
+    f.game.page = 'intro';
+    f.game.bridge.downAttack(1, 'charge'); f.game.bridge.downGuard(2);
+    const before = f.state(), sequence = f.game.sequence;
+    f.game.touchCancel(touch(null));
+    assert.equal(f.game.page, 'intro');
+    assert.deepEqual(f.state(), before); assert.equal(f.game.sequence, sequence);
+    f.game.page = 'battle';
+    f.game.bridge.downAttack(1, 'charge');
+    assert.equal(f.state().fighters[0].phase, 'charging');
+    f.game.touchCancel(touch(2)); assert.equal(f.game.page, 'paused');
+    f.game.touchEnd({ ...touch(1), type: 'touch-end' });
+    assert.equal(f.events().some(e => e.kind === 'attack-start'), false);
+});
