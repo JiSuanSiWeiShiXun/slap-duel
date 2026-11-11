@@ -13,7 +13,7 @@ game/.test-build/
 # Machine/account configuration and credentials.
 .env
 .env.*
-!.env.example
+!/.env.example
 *.pem
 *.key
 *.p12
@@ -31,3 +31,6 @@ game/.test-build/
 !/docs/public/
 !/docs/public/**
 /tools/verify-evidence.mjs
+
+# Local spike skill includes private experiment/source snapshots. Public recipes live in docs/public/.
+/.codex/skills/spike-findings-seasun-mini-game/

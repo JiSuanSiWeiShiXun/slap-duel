@@ -28,11 +28,27 @@ npm run typecheck
 node tools/check-game.mjs --typecheck
 node tools/test-build-config.mjs
 node tools/test-tooling.mjs
+node --test tools/test-wechat-package.mjs
 powershell -NoProfile -ExecutionPolicy Bypass -File tools/build-game.ps1 -Target web-desktop -Creator '<CocosCreator.exe 的完整路径>'
 node tools/serve.mjs --port 7456
 ```
 
 打开 <http://127.0.0.1:7456/>。微信构建需要开发者自己的 AppID，配置方法见开发说明。仓库不包含账号身份、AppSecret、预览二维码或构建产物。
+
+微信使用本地 `resources` 分包；配置由 `game/settings/v2/packages/builder.json` 的专用预设及 `resources.meta` 引用共同确定，Web 保持本地资源包。微信构建会检查分包声明、启动资源和主包原始字节预算，避免包体超限到生成预览时才暴露；静态检查通过仍需官方预览和实际设备验证。
+
+## 角色制作服务配置
+
+将根目录的 [.env.example](.env.example) 复制为 `.env`，填入自己的 `VIGGLE_API_KEY`。实际 `.env` 被 Git 忽略；这项配置仅由本地制作工具读取。
+
+```powershell
+# 已有 .env 时保留原配置。
+if (!(Test-Path -LiteralPath .env)) { Copy-Item -LiteralPath .env.example -Destination .env }
+npm run workflow:preflight
+npm run workflow:credits
+```
+
+`workflow:preflight` 离线检查凭据是否已配置；`workflow:credits` 只请求余额和验证认证，不生成素材。命令自动读取根目录 `.env`，已有进程环境变量优先；日志不输出密钥。服务生成、动捕和角色质量尚待实际验证。
 
 ## 结构与交付
 
@@ -44,3 +60,5 @@ node tools/serve.mjs --port 7456
 - `tools/`：构建、校验、静态试玩和发布包工具。
 
 [角色制作与重建管线](docs/public/assets.md) · [架构与当前边界](docs/public/architecture.md) · [静态站部署](docs/public/deployment.md) · [公开仓库检查](docs/public/publication.md)
+
+[模型、绑定与双人动作的复用流程](docs/public/animation-pipeline.md) · [新角色接入模板](docs/public/animation-intake-template.md)：从模型标准姿到动捕重定向、成对接触与实际游戏衔接逐层验收，并区分每角色动作接入和角色组合回归。当前尚无任意新模型一键适配能力。

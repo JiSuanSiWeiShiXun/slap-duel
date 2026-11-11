@@ -9,7 +9,7 @@ import { HUMAN_BASE, HUMAN_CLOTHING, HUMAN_GENERATOR, HUMAN_MATERIALS, isHumanSo
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const git = args => execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
-const allowed = /^(?:\.gitattributes|\.gitignore|README\.md|package\.json|tsconfig\.rules\.json|docs\/public\/[A-Za-z0-9-]+\.md|tests\/(?:[A-Za-z0-9.-]+\.cjs|fixtures\/human-manager-geometry\.json)|tools\/(?:create-office-(?:cast|human)\.py|[A-Za-z0-9.-]+\.(?:mjs|ps1))|game\/(?:assets|build-config|build-templates|settings)\/.+|game\/(?:package|tsconfig)\.json)$/;
+const allowed = /^(?:\.gitattributes|\.gitignore|\.env\.example|README\.md|package\.json|tsconfig\.rules\.json|docs\/public\/[A-Za-z0-9-]+\.md|tests\/(?:[A-Za-z0-9.-]+\.cjs|fixtures\/human-manager-geometry\.json)|tools\/(?:create-office-(?:cast|human)\.py|[A-Za-z0-9.-]+\.(?:mjs|ps1))|game\/(?:assets|build-config|build-templates|settings)\/.+|game\/(?:package|tsconfig)\.json)$/;
 const blocked = /(?:^|\/)(?:\.planning|\.notion-pm-private|node_modules|library|temp|local|profiles|build|\.ssh)(?:\/|$)|(?:^|\/)(?:AGENTS\.md|project\.private\.config\.json|information\.json|verify-evidence\.mjs)$|\.(?:pem|key|p12|pfx|png|jpe?g|zip|gz)$/i;
 const detectors = [
   ['private-key', /-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----/],
@@ -161,7 +161,8 @@ function audit(files, read) {
   for (const file of files) {
     const report = category => { if (!findings.some(f => f.file === file && f.category === category)) findings.push({ file, category }); };
     const binary = binaryPath.exec(file);
-    if (!allowed.test(file) || blocked.test(file) && !binary) { report('nonpublic-path'); continue; }
+    const privateEnv = file !== '.env.example' && /(?:^|\/)\.env(?:\.[^/]*)?$/i.test(file);
+    if (!allowed.test(file) || blocked.test(file) && !binary || privateEnv) { report('nonpublic-path'); continue; }
     try {
       const bytes = read(file);
       if (binary) {
@@ -194,7 +195,12 @@ function audit(files, read) {
         continue;
       }
       if (bytes.includes(0)) { report('unreviewed-binary'); continue; }
-      scanText(bytes.toString('utf8'), report);
+      const text = bytes.toString('utf8');
+      if (file === '.env.example' && text.split(/\r?\n/).some(line => {
+        const value = line.trim();
+        return value && !value.startsWith('#') && !/^[A-Za-z_][A-Za-z0-9_]*=\s*$/.test(value);
+      })) report('nonempty-env-example');
+      scanText(text, report);
     } catch (error) { report(`asset-validation: ${error.message}`); }
   }
   return findings;
@@ -314,6 +320,15 @@ function selfTest() {
     changed.set(humanBase + 'fabric.png', dirtyPng); assert(run(changed).some(item => item.file === humanBase + 'fabric.png' && item.category.startsWith('asset-validation:')));
   });
   check('private-key-path', () => assert(audit(['private/file.key'], () => Buffer.from('')).length));
+  check('env-example-empty-values', () => assert.deepEqual(audit(['.env.example'], () => Buffer.from('# Local configuration\nVIGGLE_API_KEY=\n')), []));
+  check('env-example-rejects-filled-values', () => assert(audit(['.env.example'], () => Buffer.from('VIGGLE_API_KEY=fixture-value\n')).some(f => f.category === 'nonempty-env-example')));
+  check('env-example-still-scans-comments', () => assert(audit(['.env.example'], () => Buffer.from('# ntn_' + 'x'.repeat(35))).some(f => f.category === 'service-token')));
+  check('private-env-paths', () => {
+    for (const file of ['.env', '.env.local', '.env.production', 'game/assets/.env', 'game/assets/.env.example',
+      '.ENV', '.ENV.production', '.Env.example', 'game/assets/.ENV', 'game/assets/.ENV.production', 'game/assets/.Env.example']) {
+      assert(audit([file], () => Buffer.from('')).some(f => f.category === 'nonpublic-path'));
+    }
+  });
   check('service-token', () => { const found = []; scanText('ntn_' + 'x'.repeat(35), c => found.push(c)); assert(found.includes('service-token')); });
   console.log(JSON.stringify({ passed: true, scope: 'isolated-public-asset-fixtures', checks: passed.length, cases: passed }));
 }

@@ -5,6 +5,8 @@
   "scripts": {
     "test": "node tools/check.mjs test",
     "test:rules": "node tools/check.mjs rules",
-    "typecheck": "node tools/check.mjs typecheck"
+    "typecheck": "node tools/check.mjs typecheck",
+    "workflow:preflight": "node --env-file-if-exists=.env tools/probe-viggle.mjs",
+    "workflow:credits": "node --env-file-if-exists=.env tools/probe-viggle.mjs --online"
   }
 }
